@@ -1,0 +1,479 @@
+import pandas as pd
+import numpy as np
+import json
+
+def plot_results(df, trades_df, symbol):
+    """
+    Generates an interactive HTML chart using TradingView's Lightweight Charts.
+    Shows candlesticks with trade entry/exit markers and connecting lines.
+    """
+    if trades_df.empty:
+        print("No trades to plot.")
+        return
+
+    # Prepare candlestick data as list of dicts
+    candles = []
+    for ts, row in df.iterrows():
+        candles.append({
+            'time': int(ts.timestamp()),
+            'open': float(row['open']),
+            'high': float(row['high']),
+            'low': float(row['low']),
+            'close': float(row['close']),
+        })
+
+    # Prepare markers for entries and exits
+    markers = []
+    for _, trade in trades_df.iterrows():
+        entry_ts = int(trade['entry_time'].timestamp())
+        exit_ts = int(trade['exit_time'].timestamp())
+        is_long = trade['type'] == 'Long'
+        is_win = trade['result'] == 'Win'
+
+        # Entry marker
+        markers.append({
+            'time': entry_ts,
+            'position': 'belowBar' if is_long else 'aboveBar',
+            'color': '#26a69a' if is_long else '#ef5350',
+            'shape': 'arrowUp' if is_long else 'arrowDown',
+            'text': f"{'BUY' if is_long else 'SELL'} @ {trade['entry']:.2f}",
+        })
+
+        # Exit marker
+        exit_color = '#4caf50' if is_win else '#f44336'
+        markers.append({
+            'time': exit_ts,
+            'position': 'aboveBar' if is_long else 'belowBar',
+            'color': exit_color,
+            'shape': 'circle',
+            'text': f"{'TP' if is_win else 'SL'} @ {trade['exit']:.2f}",
+        })
+
+    # Sort markers by time (required by Lightweight Charts)
+    markers.sort(key=lambda m: m['time'])
+
+    # Prepare trade lines data (entry-to-exit connections)
+    trade_lines = []
+    for _, trade in trades_df.iterrows():
+        is_win = trade['result'] == 'Win'
+        trade_lines.append({
+            'entry_time': int(trade['entry_time'].timestamp()),
+            'entry_price': float(trade['entry']),
+            'exit_time': int(trade['exit_time'].timestamp()),
+            'exit_price': float(trade['exit']),
+            'color': '#4caf50' if is_win else '#f44336',
+            'type': trade['type'],
+            'result': trade['result'],
+            'pnl': float(trade['pnl']),
+        })
+
+    html_content = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{symbol} Backtest Results</title>
+    <script src="https://unpkg.com/lightweight-charts@4.1.0/dist/lightweight-charts.standalone.production.js"></script>
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{
+            background: #131722;
+            color: #d1d4dc;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            overflow: hidden;
+        }}
+        #header {{
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 20px;
+            background: #1e222d;
+            border-bottom: 1px solid #2a2e39;
+        }}
+        #header h1 {{
+            font-size: 18px;
+            font-weight: 600;
+            color: #e0e3eb;
+        }}
+        #header h1 span {{
+            color: #2962ff;
+        }}
+        .stats {{
+            display: flex;
+            gap: 20px;
+            font-size: 12px;
+        }}
+        .stat {{
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }}
+        .stat-label {{
+            color: #787b86;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            font-size: 10px;
+        }}
+        .stat-value {{
+            font-weight: 600;
+            font-size: 14px;
+        }}
+        .stat-value.green {{ color: #26a69a; }}
+        .stat-value.red {{ color: #ef5350; }}
+        .stat-value.blue {{ color: #2962ff; }}
+        #legend {{
+            display: flex;
+            gap: 16px;
+            padding: 8px 20px;
+            background: #1e222d;
+            border-bottom: 1px solid #2a2e39;
+            font-size: 11px;
+        }}
+        .legend-item {{
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }}
+        .legend-dot {{
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+        }}
+        #chart-container {{
+            width: 100%;
+            height: calc(100vh - 90px);
+        }}
+        #tooltip {{
+            position: absolute;
+            display: none;
+            background: #1e222d;
+            border: 1px solid #2a2e39;
+            border-radius: 6px;
+            padding: 10px 14px;
+            font-size: 12px;
+            color: #d1d4dc;
+            z-index: 1000;
+            pointer-events: none;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+        }}
+    </style>
+</head>
+<body>
+    <div id="header">
+        <h1><span>&#9679;</span> {symbol} — Backtest Results</h1>
+        <div class="stats">
+            <div class="stat">
+                <span class="stat-label">Trades</span>
+                <span class="stat-value blue">{len(trades_df)}</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Win Rate</span>
+                <span class="stat-value green">{len(trades_df[trades_df['result']=='Win'])}/{len(trades_df)} ({len(trades_df[trades_df['result']=='Win'])/len(trades_df)*100:.1f}%)</span>
+            </div>
+            <div class="stat">
+                <span class="stat-label">Total PnL</span>
+                <span class="stat-value {'green' if trades_df['pnl'].sum() >= 0 else 'red'}">${trades_df['pnl'].sum():,.2f}</span>
+            </div>
+        </div>
+    </div>
+    <div id="legend">
+        <div class="legend-item"><div class="legend-dot" style="background:#26a69a"></div> Long Entry</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#ef5350"></div> Short Entry</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#4caf50"></div> Take Profit</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#f44336"></div> Stop Loss</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#4caf50; border-radius:0"></div> Win Line</div>
+        <div class="legend-item"><div class="legend-dot" style="background:#f44336; border-radius:0"></div> Loss Line</div>
+    </div>
+    <div id="chart-container"></div>
+    <div id="tooltip"></div>
+
+    <script>
+        const candleData = {json.dumps(candles)};
+        const markerData = {json.dumps(markers)};
+        const tradeLines = {json.dumps(trade_lines)};
+
+        const container = document.getElementById('chart-container');
+        const chart = LightweightCharts.createChart(container, {{
+            layout: {{
+                background: {{ type: 'solid', color: '#131722' }},
+                textColor: '#d1d4dc',
+            }},
+            grid: {{
+                vertLines: {{ color: '#1e222d' }},
+                horzLines: {{ color: '#1e222d' }},
+            }},
+            crosshair: {{
+                mode: LightweightCharts.CrosshairMode.Normal,
+                vertLine: {{ color: '#2962ff33', width: 1, style: 0 }},
+                horzLine: {{ color: '#2962ff33', width: 1, style: 0 }},
+            }},
+            rightPriceScale: {{
+                borderColor: '#2a2e39',
+            }},
+            timeScale: {{
+                borderColor: '#2a2e39',
+                timeVisible: true,
+                secondsVisible: false,
+            }},
+        }});
+
+        // Candlestick series
+        const candleSeries = chart.addCandlestickSeries({{
+            upColor: '#26a69a',
+            downColor: '#ef5350',
+            borderUpColor: '#26a69a',
+            borderDownColor: '#ef5350',
+            wickUpColor: '#26a69a',
+            wickDownColor: '#ef5350',
+        }});
+        candleSeries.setData(candleData);
+        candleSeries.setMarkers(markerData);
+
+        // Draw trade connection lines using line series
+        tradeLines.forEach(function(trade) {{
+            const lineSeries = chart.addLineSeries({{
+                color: trade.color,
+                lineWidth: 2,
+                lineStyle: trade.result === 'Win' ? 0 : 2,
+                crosshairMarkerVisible: false,
+                lastValueVisible: false,
+                priceLineVisible: false,
+            }});
+            lineSeries.setData([
+                {{ time: trade.entry_time, value: trade.entry_price }},
+                {{ time: trade.exit_time, value: trade.exit_price }},
+            ]);
+        }});
+
+        chart.timeScale().fitContent();
+
+        // Resize handler
+        window.addEventListener('resize', () => {{
+            chart.applyOptions({{
+                width: container.clientWidth,
+                height: container.clientHeight,
+            }});
+        }});
+    </script>
+</body>
+</html>"""
+
+    output_file = "backtest_plot.html"
+    with open(output_file, 'w', encoding='utf-8') as f:
+        f.write(html_content)
+    print(f"Chart saved to {output_file}")
+
+
+def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.618):
+    """
+    Runs a simple iterrows backtest on the prepared dataframe.
+    """
+    balance = initial_balance
+    positions = []
+    trades = []
+    
+    # State tracking
+    in_position = False
+    entry_price = 0
+    sl_price = 0
+    tp_price = 0
+    position_type = 0 # 1 for Long, -1 for Short
+    entry_time = None
+    position_size = 0
+    equity_curve = []
+    
+    print(f"Starting backtest with {len(df)} candles.")
+    
+    for i, (index, row) in enumerate(df.iterrows()):
+        
+        # Check if we need to close the current position
+        if in_position:
+            if position_type == 1: # Long
+                if row['low'] <= sl_price:
+                    # Stopped out
+                    pnl = (sl_price - entry_price) * position_size
+                    balance += pnl
+                    print(f"[{index}] CLOSED LONG at {sl_price:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'exit': sl_price, 'pnl': pnl, 'result': 'Loss'})
+                    in_position = False
+                elif row['high'] >= tp_price:
+                    # Take profit hit
+                    pnl = (tp_price - entry_price) * position_size
+                    balance += pnl
+                    print(f"[{index}] CLOSED LONG at {tp_price:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'exit': tp_price, 'pnl': pnl, 'result': 'Win'})
+                    in_position = False
+            elif position_type == -1: # Short
+                if row['high'] >= sl_price:
+                    # Stopped out
+                    pnl = (entry_price - sl_price) * position_size
+                    balance += pnl
+                    print(f"[{index}] CLOSED SHORT at {sl_price:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'exit': sl_price, 'pnl': pnl, 'result': 'Loss'})
+                    in_position = False
+                elif row['low'] <= tp_price:
+                    # Take profit hit
+                    pnl = (entry_price - tp_price) * position_size
+                    balance += pnl
+                    print(f"[{index}] CLOSED SHORT at {tp_price:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'exit': tp_price, 'pnl': pnl, 'result': 'Win'})
+                    in_position = False
+                    
+        # If not in position, look for entry
+        if not in_position:
+            htf_trend = row.get('htf_trend', 0)
+            
+            # Ensure valid swings
+            if pd.isna(row['last_swing_high']) or pd.isna(row['last_swing_low']):
+                continue
+                
+            sh = row['last_swing_high']
+            sl = row['last_swing_low']
+            swing_range = sh - sl
+            
+            if swing_range <= 0:
+                continue
+                
+            if htf_trend == 1:
+                # Uptrend HTF. We look for a retracement down.
+                # Assuming the last swing was an impulse UP (Swing Low -> Swing High)
+                # Fib level is measured from High down to Low
+                entry_level = sh - (swing_range * fib_level)
+                
+                # If price retraces down and touches entry_level
+                if row['low'] <= entry_level and row['open'] > entry_level:
+                    sl_dist = entry_level - sl
+                    if sl_dist > 0:
+                        position_size = (initial_balance * risk_per_trade) / sl_dist
+                        in_position = True
+                        position_type = 1
+                        entry_price = entry_level
+                        sl_price = sl # Stop loss at swing low
+                        tp_price = sh # Take profit at swing high
+                        entry_time = index
+                        # print(f"[{index}] OPEN LONG at {entry_level:.4f} | Size: {position_size:.2f} | Risk: ${(balance * risk_per_trade):.2f}")
+                    
+            elif htf_trend == -1:
+                # Downtrend HTF. Look for retracement up.
+                # Assuming the last swing was an impulse DOWN (Swing High -> Swing Low)
+                # Fib level is measured from Low up to High
+                entry_level = sl + (swing_range * fib_level)
+                
+                # If price retraces up and touches entry_level
+                if row['high'] >= entry_level and row['open'] < entry_level:
+                    sl_dist = sh - entry_level
+                    if sl_dist > 0:
+                        position_size = (initial_balance * risk_per_trade) / sl_dist
+                        in_position = True
+                        position_type = -1
+                        entry_price = entry_level
+                        sl_price = sh # Stop loss at swing high
+                        tp_price = sl # Take profit at swing low
+                        entry_time = index
+                        # print(f"[{index}] OPEN SHORT at {entry_level:.4f} | Size: {position_size:.2f} | Risk: ${(balance * risk_per_trade):.2f}")
+
+        # Track floating equity
+        floating_pnl = 0
+        if in_position:
+            if position_type == 1:
+                floating_pnl = (row['close'] - entry_price) * position_size
+            elif position_type == -1:
+                floating_pnl = (entry_price - row['close']) * position_size
+        equity_curve.append({'time': index, 'equity': balance + floating_pnl})
+
+    # Close any open position at the end
+    if in_position:
+        last_price = df.iloc[-1]['close']
+        pnl = (last_price - entry_price) * position_size if position_type == 1 else (entry_price - last_price) * position_size
+        balance += pnl
+        # print(f"[{df.index[-1]}] CLOSED {'LONG' if position_type == 1 else 'SHORT'} at {last_price:.4f} (End of Backtest) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+        trades.append({'entry_time': entry_time, 'exit_time': df.index[-1], 'type': 'Long' if position_type == 1 else 'Short', 'entry': entry_price, 'exit': last_price, 'pnl': pnl, 'result': 'Open/Closed at End'})
+
+    trades_df = pd.DataFrame(trades)
+    
+    # Calculate metrics
+    if not trades_df.empty:
+        total_trades = len(trades_df)
+        wins = len(trades_df[trades_df['result'] == 'Win'])
+        win_rate = wins / total_trades if total_trades > 0 else 0
+        total_pnl = trades_df['pnl'].sum()
+        
+        equity_df = pd.DataFrame(equity_curve).set_index('time')
+        peak = equity_df['equity'].cummax()
+        drawdown = (equity_df['equity'] - peak) / peak
+        max_drawdown = drawdown.min()
+        
+        # Identify distinct drawdown episodes > 10%
+        in_dd = (drawdown < -0.10)
+        dd_starts = in_dd & ~in_dd.shift(1, fill_value=False)
+        dd_ends = ~in_dd & in_dd.shift(1, fill_value=False)
+        
+        start_times = drawdown.index[dd_starts]
+        end_times = drawdown.index[dd_ends]
+        
+        # If still in a drawdown at the end, count it
+        if in_dd.iloc[-1]:
+            end_times = end_times.append(pd.DatetimeIndex([drawdown.index[-1]]))
+        
+        num_dd_episodes = len(start_times)
+        dd_episodes = []
+        for s, e in zip(start_times, end_times):
+            episode = drawdown.loc[s:e]
+            worst = episode.min()
+            duration = e - s
+            dd_episodes.append({'start': s, 'end': e, 'worst': worst, 'duration': duration})
+        
+        daily_equity = equity_df['equity'].resample('D').last().dropna()
+        daily_returns = daily_equity.pct_change().dropna()
+        
+        daily_std = daily_returns.std()
+        annualized_std = daily_std * np.sqrt(252) if daily_std != 0 else 0.0
+        sharpe_ratio = np.sqrt(252) * (daily_returns.mean() / daily_std) if daily_std != 0 else 0.0
+        
+        # New Metrics: Total Return
+        total_return_pct = (balance - initial_balance) / initial_balance
+        
+        # New Metrics: Prop Firm Style (+15% of initial cap, without -8% of initial cap loss)
+        # e.g. for $10k initial: win condition is gaining $1500, lose condition is losing $800.
+        profit_target_amount = initial_balance * 0.15
+        drawdown_limit_amount = initial_balance * 0.08
+        
+        prop_firm_passes = 0
+        prop_firm_fails = 0
+        current_baseline = initial_balance
+        
+        for eq in equity_curve:
+            val = eq['equity']
+            
+            # Did we hit the profit target relative to current baseline?
+            if val >= current_baseline + profit_target_amount:
+                prop_firm_passes += 1
+                current_baseline = val  # Reset baseline after target hit
+                
+            # Did we hit the drawdown limit relative to current baseline?
+            elif val <= current_baseline - drawdown_limit_amount:
+                prop_firm_fails += 1
+                current_baseline = val  # Reset baseline after failure
+        
+        print("\n--- Backtest Results ---")
+        print(f"Total Trades: {total_trades}")
+        print(f"Wins: {wins}")
+        print(f"Win Rate: {win_rate:.2%}")
+        print(f"Total PnL: ${total_pnl:.2f}")
+        print(f"Total Return: {total_return_pct:.2%}")
+        print(f"Max Drawdown: {max_drawdown:.2%}")
+        print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
+        print(f"Ann. Std Dev: {annualized_std:.2%}")
+        print(f"Profit Factor: {total_pnl / (abs(trades_df['pnl'].sum()) if trades_df['pnl'].sum() != 0 else 1):.2f}")
+        print(f"Num Trades / DD > 10% Episodes: {total_trades / num_dd_episodes if num_dd_episodes > 0 else float('inf'):.2f}")
+        print(f"Drawdown >10% Episodes: {num_dd_episodes}")
+        print(f"Prop Firm Challenge (+15% before -8%): {prop_firm_passes} Passes / {prop_firm_fails} Fails")
+        if dd_episodes:
+            print("\n--- Drawdown >10% Details ---")
+            for i, ep in enumerate(dd_episodes, 1):
+                print(f"  Episode {i}: {ep['start']} to {ep['end']} | Worst: {ep['worst']:.2%} | Duration: {ep['duration']}")
+        print(f"\nFinal Balance: ${balance:.2f}")
+    else:
+        print("No trades taken during the period.")
+        
+    return trades_df
