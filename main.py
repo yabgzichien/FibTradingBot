@@ -30,7 +30,7 @@ def main():
     if htf_data.empty or etf_data.empty:
         print("Error fetching data. Exiting.")
         return
-
+ 
     print("Generating Signals...")
     strategy_df = generate_signals(htf_data, etf_data, fib_level=fib_level)
     

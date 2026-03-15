@@ -14,7 +14,7 @@ def get_data(symbol, timeframe, start_date, end_date):
     timezone = pytz.timezone("UTC")
     utc_from = timezone.localize(start_date)
     utc_to = timezone.localize(end_date)
-    
+     
     tf_map = {
         'M1': mt5.TIMEFRAME_M1,
         'M5': mt5.TIMEFRAME_M5,
