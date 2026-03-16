@@ -1,6 +1,6 @@
 from data_loader import initialize_mt5, get_data
 from strategy import generate_signals
-from backtest import run_backtest, plot_results
+from backtest import run_backtest, plot_results, monte_carlo_simulation, plot_return_distribution
 from datetime import datetime, timedelta
 import pandas as pd
 import pytz
@@ -52,8 +52,13 @@ def main():
     print("Running Backtest...")
     trades_df = run_backtest(strategy_df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=fib_level)
 
-    print("Creating Plot...")
+    print("Creating Trade Plot...")
     plot_results(strategy_df, trades_df, symbol)
+
+    # Monte Carlo simulation on trade PnLs
+    print("Running Monte Carlo simulation...")
+    final_balances = monte_carlo_simulation(trades_df, initial_balance=10000.0, n_sims=1000)
+    plot_return_distribution(final_balances, initial_balance=10000.0)
 
 if __name__ == "__main__":
     main()

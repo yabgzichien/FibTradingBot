@@ -1,6 +1,7 @@
 import pandas as pd
 import numpy as np
 import json
+import matplotlib.pyplot as plt
 
 def plot_results(df, trades_df, symbol):
     """
@@ -294,14 +295,34 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
                     pnl = (sl_price - entry_price) * position_size
                     balance += pnl
                     print(f"[{index}] CLOSED LONG at {sl_price:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'exit': sl_price, 'pnl': pnl, 'result': 'Loss'})
+                    trades.append({
+                        'entry_time': entry_time,
+                        'exit_time': index,
+                        'type': 'Long',
+                        'entry': entry_price,
+                        'tp_price': tp_price,
+                        'sl_price': sl_price,
+                        'exit': sl_price,
+                        'pnl': pnl,
+                        'result': 'Loss'
+                    })
                     in_position = False
                 elif row['high'] >= tp_price:
                     # Take profit hit
                     pnl = (tp_price - entry_price) * position_size
                     balance += pnl
                     print(f"[{index}] CLOSED LONG at {tp_price:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'exit': tp_price, 'pnl': pnl, 'result': 'Win'})
+                    trades.append({
+                        'entry_time': entry_time,
+                        'exit_time': index,
+                        'type': 'Long',
+                        'entry': entry_price,
+                        'tp_price': tp_price,
+                        'sl_price': sl_price,
+                        'exit': tp_price,
+                        'pnl': pnl,
+                        'result': 'Win'
+                    })
                     in_position = False
             elif position_type == -1: # Short
                 if row['high'] >= sl_price:
@@ -309,14 +330,34 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
                     pnl = (entry_price - sl_price) * position_size
                     balance += pnl
                     print(f"[{index}] CLOSED SHORT at {sl_price:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'exit': sl_price, 'pnl': pnl, 'result': 'Loss'})
+                    trades.append({
+                        'entry_time': entry_time,
+                        'exit_time': index,
+                        'type': 'Short',
+                        'entry': entry_price,
+                        'tp_price': tp_price,
+                        'sl_price': sl_price,
+                        'exit': sl_price,
+                        'pnl': pnl,
+                        'result': 'Loss'
+                    })
                     in_position = False
                 elif row['low'] <= tp_price:
                     # Take profit hit
                     pnl = (entry_price - tp_price) * position_size
                     balance += pnl
                     print(f"[{index}] CLOSED SHORT at {tp_price:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'exit': tp_price, 'pnl': pnl, 'result': 'Win'})
+                    trades.append({
+                        'entry_time': entry_time,
+                        'exit_time': index,
+                        'type': 'Short',
+                        'entry': entry_price,
+                        'tp_price': tp_price,
+                        'sl_price': sl_price,
+                        'exit': tp_price,
+                        'pnl': pnl,
+                        'result': 'Win'
+                    })
                     in_position = False
                     
         # If not in position, look for entry
@@ -387,9 +428,28 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
         pnl = (last_price - entry_price) * position_size if position_type == 1 else (entry_price - last_price) * position_size
         balance += pnl
         # print(f"[{df.index[-1]}] CLOSED {'LONG' if position_type == 1 else 'SHORT'} at {last_price:.4f} (End of Backtest) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-        trades.append({'entry_time': entry_time, 'exit_time': df.index[-1], 'type': 'Long' if position_type == 1 else 'Short', 'entry': entry_price, 'exit': last_price, 'pnl': pnl, 'result': 'Open/Closed at End'})
+        trades.append({
+            'entry_time': entry_time,
+            'exit_time': df.index[-1],
+            'type': 'Long' if position_type == 1 else 'Short',
+            'entry': entry_price,
+            'tp_price': np.nan,
+            'sl_price': np.nan,
+            'exit': last_price,
+            'pnl': pnl,
+            'result': 'Open/Closed at End'
+        })
 
     trades_df = pd.DataFrame(trades)
+
+    # Compute trade durations and exit reasons
+    if not trades_df.empty:
+        trades_df['duration'] = trades_df['exit_time'] - trades_df['entry_time']
+        trades_df['duration_minutes'] = trades_df['duration'].dt.total_seconds() / 60.0
+        trades_df['exit_reason'] = trades_df['result'].map({
+            'Win': 'TP',
+            'Loss': 'SL'
+        }).fillna('End')
     
     # Calculate metrics
     if not trades_df.empty:
@@ -397,6 +457,7 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
         wins = len(trades_df[trades_df['result'] == 'Win'])
         win_rate = wins / total_trades if total_trades > 0 else 0
         total_pnl = trades_df['pnl'].sum()
+        avg_trade_duration = trades_df['duration'].mean()
         
         equity_df = pd.DataFrame(equity_curve).set_index('time')
         peak = equity_df['equity'].cummax()
@@ -432,6 +493,16 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
         
         # New Metrics: Total Return
         total_return_pct = (balance - initial_balance) / initial_balance
+
+        # Max consecutive take profit wins in a row
+        max_consecutive_tp_wins = 0
+        current_streak = 0
+        for result in trades_df['result']:
+            if result == 'Win':
+                current_streak += 1
+                max_consecutive_tp_wins = max(max_consecutive_tp_wins, current_streak)
+            else:
+                current_streak = 0
         
         # New Metrics: Prop Firm Style (+15% of initial cap, without -8% of initial cap loss)
         # e.g. for $10k initial: win condition is gaining $1500, lose condition is losing $800.
@@ -460,6 +531,7 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
         print(f"Wins: {wins}")
         print(f"Win Rate: {win_rate:.2%}")
         print(f"Total PnL: ${total_pnl:.2f}")
+        print(f"Average Trade Duration: {avg_trade_duration}")
         print(f"Total Return: {total_return_pct:.2%}")
         print(f"Max Drawdown: {max_drawdown:.2%}")
         print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
@@ -468,6 +540,7 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
         print(f"Num Trades / DD > 10% Episodes: {total_trades / num_dd_episodes if num_dd_episodes > 0 else float('inf'):.2f}")
         print(f"Drawdown >10% Episodes: {num_dd_episodes}")
         print(f"Prop Firm Challenge (+15% before -8%): {prop_firm_passes} Passes / {prop_firm_fails} Fails")
+        print(f"Max Consecutive Take Profit Wins: {max_consecutive_tp_wins}")
         if dd_episodes:
             print("\n--- Drawdown >10% Details ---")
             for i, ep in enumerate(dd_episodes, 1):
@@ -475,5 +548,68 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
         print(f"\nFinal Balance: ${balance:.2f}")
     else:
         print("No trades taken during the period.")
-        
+
+    # Save trade-by-trade details to CSV
+    if not trades_df.empty:
+        export_cols = [
+            'entry_time',
+            'exit_time',
+            'entry',
+            'tp_price',
+            'sl_price',
+            'exit',
+            'result',
+            'exit_reason',
+            'duration',
+            'duration_minutes',
+            'pnl'
+        ]
+        trades_df.to_csv("backtest_trades.csv", columns=export_cols, index=False)
+        print("Trade details saved to backtest_trades.csv")
+
     return trades_df
+
+
+def monte_carlo_simulation(trades_df, initial_balance=10000.0, n_sims=1000):
+    """
+    Runs a simple Monte Carlo simulation by randomly shuffling trade PnLs
+    (with replacement) to generate a distribution of final returns.
+    Returns an array of final balances.
+    """
+    if trades_df.empty:
+        return np.array([])
+
+    pnls = trades_df['pnl'].values
+    n_trades = len(pnls)
+    final_balances = []
+
+    for _ in range(n_sims):
+        balance = initial_balance
+        sampled_pnls = np.random.choice(pnls, size=n_trades, replace=True)
+        for pnl in sampled_pnls:
+            balance += pnl
+        final_balances.append(balance)
+
+    return np.array(final_balances)
+
+
+def plot_return_distribution(final_balances, initial_balance=10000.0, output_file="monte_carlo_returns.png"):
+    """
+    Plots and saves a histogram of Monte Carlo final returns.
+    """
+    if final_balances.size == 0:
+        print("No Monte Carlo results to plot.")
+        return
+
+    returns = (final_balances - initial_balance) / initial_balance
+
+    plt.figure(figsize=(8, 5))
+    plt.hist(returns, bins=40, color="#2962ff", alpha=0.8, edgecolor="black")
+    plt.title("Monte Carlo Final Return Distribution")
+    plt.xlabel("Total Return")
+    plt.ylabel("Frequency")
+    plt.grid(alpha=0.2)
+    plt.tight_layout()
+    plt.savefig(output_file, dpi=120)
+    plt.close()
+    print(f"Monte Carlo return distribution saved to {output_file}")

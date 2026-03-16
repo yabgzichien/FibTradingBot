@@ -88,6 +88,8 @@ def silent_backtest(df, initial_balance, risk_per_trade, fib_level):
             passes_part, fails_part = parts.split("/")
             metrics['prop_firm_passes'] = int(passes_part.strip().split(" ")[0])
             metrics['prop_firm_fails'] = int(fails_part.strip().split(" ")[0])
+        elif "Max Consecutive Take Profit Wins:" in line:
+            metrics['max_consecutive_tp_wins'] = int(line.split(":")[1].strip())
 
     return trades_df, metrics
 
@@ -167,7 +169,7 @@ def main():
     print("=" * 130)
     
     # Select columns to display for clarity
-    display_cols = ['fib_level', 'htf_swing_window', 'etf_swing_window', 'prop_firm_passes', 'prop_firm_fails', 'total_trades', 'win_rate', 'total_return', 'max_drawdown', 'sharpe_ratio', 'trades_per_dd']
+    display_cols = ['fib_level', 'htf_swing_window', 'etf_swing_window', 'prop_firm_passes', 'prop_firm_fails', 'max_consecutive_tp_wins', 'total_trades', 'win_rate', 'total_return', 'max_drawdown', 'sharpe_ratio', 'trades_per_dd']
     print(results_df[display_cols].to_string())
 
     # Save to CSV
@@ -193,6 +195,7 @@ def main():
     print(f"  Ann. Std Dev:        {best['ann_std']}")
     print(f"  DD >10% Episodes:    {best['dd_episodes']}")
     print(f"  Trades/DD>10%:       {best['trades_per_dd']:.2f}")
+    print(f"  Max Consecutive TP Wins: {best.get('max_consecutive_tp_wins', 0)}")
     print(f"  Final Balance:       ${best['final_balance']:.2f}")
     print("=" * 100)
 
