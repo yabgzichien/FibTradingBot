@@ -2,6 +2,8 @@ import pandas as pd
 import numpy as np
 import json
 import matplotlib.pyplot as plt
+import os
+from datetime import datetime
 
 def plot_results(df, trades_df, symbol):
     """
@@ -564,8 +566,19 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
             'duration_minutes',
             'pnl'
         ]
-        trades_df.to_csv("backtest_trades.csv", columns=export_cols, index=False)
-        print("Trade details saved to backtest_trades.csv")
+        out_path = "backtest_trades.csv"
+        try:
+            trades_df.to_csv(out_path, columns=export_cols, index=False)
+            print(f"Trade details saved to {out_path}")
+        except PermissionError:
+            # Windows commonly locks CSVs when opened in Excel.
+            ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            alt_path = f"backtest_trades_{ts}.csv"
+            trades_df.to_csv(alt_path, columns=export_cols, index=False)
+            print(
+                f"Could not write to {out_path} (file may be open). "
+                f"Trade details saved to {alt_path} instead."
+            )
 
     return trades_df
 

@@ -9,23 +9,22 @@ def main():
     if not initialize_mt5():
         return
 
-    symbol = "XAUUSD"
+    symbol = "BTCUSD"
     htf = "H4"
     etf = "M15"
     fib_level = 0.786
-    days = 365
+    days = 7
+    htf_warmup_days = 60  # Extra lookback so H4 swings/trend are fully initialised
 
-    # Fetch data for the last 6 months
-    # mt5.copy_rates_range expects datetimes. If we provide timezone aware, we shouldn't localize again in get_data.
-    # Actually, it's safer to just provide naive UTC datetimes to get_data.
     end_date = datetime.utcnow()
-    start_date = end_date - timedelta(days=days)
+    etf_start = end_date - timedelta(days=days)
+    htf_start = end_date - timedelta(days=days + htf_warmup_days)  # H4 fetches further back
 
-    print(f"Fetching {htf} data for {symbol}...")
-    htf_data = get_data(symbol, htf, start_date, end_date)
-    
+    print(f"Fetching {htf} data for {symbol} (with {htf_warmup_days}-day warm-up buffer)...")
+    htf_data = get_data(symbol, htf, htf_start, end_date)
+
     print(f"Fetching {etf} data for {symbol}...")
-    etf_data = get_data(symbol, etf, start_date, end_date)
+    etf_data = get_data(symbol, etf, etf_start, end_date)
 
     if htf_data.empty or etf_data.empty:
         print("Error fetching data. Exiting.")
