@@ -23,18 +23,22 @@ logging.basicConfig(
 
 # ── Configuration ─────────────────────────────────────────────────────────────
 SYMBOL = input("Enter trading symbol (e.g. BTCUSD, XAUUSD): ").upper() or "BTCUSD"
-HTF = "H4"
+HTF = "H1"
 ETF = "M15"
 
 # Rank 1 Strategy Parameters
 HTF_WINDOW = 7
-ETF_WINDOW = 3
-ENTRY_RETRACEMENT = 0.71
+ETF_WINDOW = 1
+ENTRY_RETRACEMENT = 0.618
+SWEEP_MODE = "prev_bar"
+INTERNAL_STRUCTURE_LOOKBACK_BARS = 1
+MAX_BOS_WAIT_BARS = 8
 
 # Risk Management
 INITIAL_BALANCE = 10000.0
 RISK_PER_TRADE_PCT = 0.01  # 1% of initial balance = $100 Risk per trade
-RISK_DOLLARS = INITIAL_BALANCE * RISK_PER_TRADE_PCT
+RISK_BASE = "initial"
+MIN_SL_POINTS = 0.0
 
 # MT5 Details
 MAGIC_NUMBER = 1001001  # Unique identifier for trades placed by this bot
@@ -43,6 +47,7 @@ ORDER_REPLACE_TOL_POINTS = 10  # Reuse existing pending if within this tolerance
 ETF_LOOKBACK_DAYS = 7          # How many days of M15 data to fetch
 HTF_WARMUP_DAYS = 60           # Extra H4 history for swing/trend warm-up
 ETF_WARMUP_CANDLES = 360       # 15M warmup candles (360 × 15min = 3.75 days)
+MAX_PENDING_BARS = 96
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -187,19 +192,26 @@ def calculate_lot_size(symbol, entry_price, sl_price, risk_dollars):
         logging.error(f"Symbol {symbol} not found.")
         return 0.01
         
-    # Distance in points
-    sl_points = abs(entry_price - sl_price) / symbol_info.point
-    
-    # Tick value is the value of 1 point move for 1 standard lot
-    tick_value = symbol_info.trade_tick_value
-    tick_size = symbol_info.trade_tick_size
-    
-    if sl_points == 0 or tick_value == 0:
+    entry_price = float(entry_price)
+    sl_price = float(sl_price)
+
+    tick_value = float(getattr(symbol_info, "trade_tick_value", 0.0) or 0.0)
+    tick_size = float(getattr(symbol_info, "trade_tick_size", 0.0) or 0.0)
+    point = float(getattr(symbol_info, "point", 0.0) or 0.0)
+    if tick_size <= 0:
+        tick_size = point if point > 0 else 0.01
+    if point <= 0:
+        point = tick_size
+
+    sl_dist = abs(entry_price - sl_price)
+    min_sl_dist = float(MIN_SL_POINTS) * point
+    safe_sl_dist = max(sl_dist, min_sl_dist) if min_sl_dist > 0 else sl_dist
+
+    sl_ticks = safe_sl_dist / tick_size
+    if sl_ticks <= 0 or tick_value <= 0:
         return symbol_info.volume_min
         
-    # Risk = Lots * sl_points * tick_value
-    # Lots = Risk / (sl_points * tick_value)
-    lots = risk_dollars / (sl_points * tick_value)
+    lots = float(risk_dollars) / (sl_ticks * tick_value)
     
     # Round to nearest allowed volume step
     step = symbol_info.volume_step
@@ -402,6 +414,23 @@ def analyze_and_trade():
         )
         logging.info("Currently in an active position. Waiting for outcome.")
         return
+
+    pending = get_bot_pending_orders(SYMBOL, MAGIC_NUMBER)
+    if pending:
+        now_ts = datetime.utcnow().timestamp()
+        max_age_sec = float(MAX_PENDING_BARS) * 15.0 * 60.0
+        stale = []
+        for o in pending:
+            t = getattr(o, "time_setup", None)
+            if t is None:
+                continue
+            try:
+                if (now_ts - float(t)) > max_age_sec:
+                    stale.append(o)
+            except Exception:
+                continue
+        for o in stale:
+            cancel_pending_order(o.ticket)
         
     # H4 fetches extra history so swing detection / trend have enough warm-up candles.
     # M15 only needs the recent window — keeping it short avoids unnecessary data load.
@@ -425,7 +454,10 @@ def analyze_and_trade():
             etf_data,
             anchor_swing_window=HTF_WINDOW,
             execution_swing_window=ETF_WINDOW,
-            entry_retracement=ENTRY_RETRACEMENT
+            entry_retracement=ENTRY_RETRACEMENT,
+            sweep_mode=SWEEP_MODE,
+            internal_structure_lookback_bars=INTERNAL_STRUCTURE_LOOKBACK_BARS,
+            max_bos_wait_bars=MAX_BOS_WAIT_BARS
         )
     except Exception as e:
         logging.error(f"Strategy generation failed: {e}")
@@ -439,13 +471,14 @@ def analyze_and_trade():
         return
         
     current_row = strategy_df.iloc[-2]
+    setup_id = current_row.get('setup_id', np.nan)
     entry_level = current_row.get('entry_level', np.nan)
     setup_dir = current_row.get('setup_dir', np.nan)
     sl_level = current_row.get('sl_level', np.nan)
     tp_level = current_row.get('tp_level', np.nan)
     entry_in_fvg = bool(current_row.get('entry_in_fvg', False))
 
-    if pd.isna(entry_level) or pd.isna(setup_dir) or pd.isna(sl_level) or pd.isna(tp_level):
+    if pd.isna(setup_id) or pd.isna(entry_level) or pd.isna(setup_dir) or pd.isna(sl_level) or pd.isna(tp_level):
         cancel_all_bot_pending_orders(SYMBOL, MAGIC_NUMBER, reason="no valid sweep/BOS setup")
         logging.info("No valid setup. Waiting.")
         return
@@ -455,12 +488,20 @@ def analyze_and_trade():
         return
 
     action = 1 if int(setup_dir) == 1 else -1
+
+    base_balance = INITIAL_BALANCE
+    if RISK_BASE != "initial":
+        acct = mt5.account_info()
+        if acct is not None:
+            base_balance = float(getattr(acct, "balance", base_balance) or base_balance)
+    risk_dollars = float(base_balance) * float(RISK_PER_TRADE_PCT)
+
     logging.info(
-        f"Placing setup. Dir={'BUY' if action == 1 else 'SELL'} Entry={float(entry_level):.2f} "
+        f"Placing setup_id={int(setup_id)} Dir={'BUY' if action == 1 else 'SELL'} Entry={float(entry_level):.2f} "
         f"SL={float(sl_level):.2f} TP={float(tp_level):.2f} EntryInFVG={entry_in_fvg} "
         f"CurrentBid={bid:.2f} CurrentAsk={ask:.2f}"
     )
-    sync_pending_order(SYMBOL, action, float(entry_level), float(sl_level), float(tp_level), RISK_DOLLARS)
+    sync_pending_order(SYMBOL, action, float(entry_level), float(sl_level), float(tp_level), risk_dollars)
 
 def update_trade_results():
     """
