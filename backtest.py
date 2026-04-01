@@ -267,12 +267,28 @@ def plot_results(df, trades_df, symbol):
     print(f"Chart saved to {output_file}")
 
 
-def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.618):
+def run_backtest(
+    df,
+    initial_balance=10000.0,
+    risk_per_trade=0.01,
+    fib_level=0.618,
+    spread_points=0,
+    slippage_points=0,
+    commission_per_unit=0,
+    point_value=0.01,
+    use_refined_setups=True,
+    max_pending_bars=96,
+    replace_pending_on_new_setup=True,
+    verbose=False,
+    risk_base="initial",
+    min_sl_points=0.0,
+    both_hit_policy="sl",
+    allow_entry_bar_tp=True,
+):
     """
-    Runs a simple iterrows backtest on the prepared dataframe.
+    Runs an iterrows backtest with realistic costs (spread, slippage, commission).
     """
     balance = initial_balance
-    positions = []
     trades = []
     
     # State tracking
@@ -284,19 +300,41 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
     entry_time = None
     position_size = 0
     equity_curve = []
+    pending = False
+    pending_setup_id = None
+    pending_dir = 0
+    pending_entry = np.nan
+    pending_sl = np.nan
+    pending_tp = np.nan
+    pending_since_i = None
+    pending_active_from_i = None
+    used_setup_ids = set()
     
-    print(f"Starting backtest with {len(df)} candles.")
+    # Realistic costs in price terms
+    entry_cost_points = (spread_points + slippage_points) * point_value
+    exit_cost_points = slippage_points * point_value
+    
+    if verbose:
+        print(f"Starting backtest with {len(df)} candles. Costs: Spread={spread_points}, Slippage={slippage_points}, Commission=${commission_per_unit}/unit")
     
     for i, (index, row) in enumerate(df.iterrows()):
         
         # Check if we need to close the current position
         if in_position:
             if position_type == 1: # Long
-                if row['low'] <= sl_price:
-                    # Stopped out
-                    pnl = (sl_price - entry_price) * position_size
+                sl_hit = row['low'] <= sl_price
+                tp_hit = row['high'] >= tp_price
+                if sl_hit and tp_hit:
+                    exit_at_sl = (both_hit_policy != "tp")
+                else:
+                    exit_at_sl = sl_hit
+                if exit_at_sl:
+                    # Stopped out at SL (plus slippage)
+                    execution_exit = sl_price - exit_cost_points
+                    pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
                     balance += pnl
-                    print(f"[{index}] CLOSED LONG at {sl_price:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+                    if verbose:
+                        print(f"[{index}] CLOSED LONG at {execution_exit:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
                     trades.append({
                         'entry_time': entry_time,
                         'exit_time': index,
@@ -304,16 +342,18 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
                         'entry': entry_price,
                         'tp_price': tp_price,
                         'sl_price': sl_price,
-                        'exit': sl_price,
+                        'exit': execution_exit,
                         'pnl': pnl,
                         'result': 'Loss'
                     })
                     in_position = False
-                elif row['high'] >= tp_price:
-                    # Take profit hit
-                    pnl = (tp_price - entry_price) * position_size
+                elif tp_hit:
+                    # Take profit hit (plus slippage)
+                    execution_exit = tp_price - exit_cost_points
+                    pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
                     balance += pnl
-                    print(f"[{index}] CLOSED LONG at {tp_price:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+                    if verbose:
+                        print(f"[{index}] CLOSED LONG at {execution_exit:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
                     trades.append({
                         'entry_time': entry_time,
                         'exit_time': index,
@@ -321,17 +361,25 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
                         'entry': entry_price,
                         'tp_price': tp_price,
                         'sl_price': sl_price,
-                        'exit': tp_price,
+                        'exit': execution_exit,
                         'pnl': pnl,
                         'result': 'Win'
                     })
                     in_position = False
             elif position_type == -1: # Short
-                if row['high'] >= sl_price:
-                    # Stopped out
-                    pnl = (entry_price - sl_price) * position_size
+                sl_hit = row['high'] >= sl_price
+                tp_hit = row['low'] <= tp_price
+                if sl_hit and tp_hit:
+                    exit_at_sl = (both_hit_policy != "tp")
+                else:
+                    exit_at_sl = sl_hit
+                if exit_at_sl:
+                    # Stopped out at SL (plus slippage)
+                    execution_exit = sl_price + exit_cost_points
+                    pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
                     balance += pnl
-                    print(f"[{index}] CLOSED SHORT at {sl_price:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+                    if verbose:
+                        print(f"[{index}] CLOSED SHORT at {execution_exit:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
                     trades.append({
                         'entry_time': entry_time,
                         'exit_time': index,
@@ -339,16 +387,18 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
                         'entry': entry_price,
                         'tp_price': tp_price,
                         'sl_price': sl_price,
-                        'exit': sl_price,
+                        'exit': execution_exit,
                         'pnl': pnl,
                         'result': 'Loss'
                     })
                     in_position = False
-                elif row['low'] <= tp_price:
-                    # Take profit hit
-                    pnl = (entry_price - tp_price) * position_size
+                elif tp_hit:
+                    # Take profit hit (plus slippage)
+                    execution_exit = tp_price + exit_cost_points
+                    pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
                     balance += pnl
-                    print(f"[{index}] CLOSED SHORT at {tp_price:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
+                    if verbose:
+                        print(f"[{index}] CLOSED SHORT at {execution_exit:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
                     trades.append({
                         'entry_time': entry_time,
                         'exit_time': index,
@@ -356,64 +406,202 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
                         'entry': entry_price,
                         'tp_price': tp_price,
                         'sl_price': sl_price,
-                        'exit': tp_price,
+                        'exit': execution_exit,
                         'pnl': pnl,
                         'result': 'Win'
                     })
                     in_position = False
                     
-        # If not in position, look for entry
         if not in_position:
-            htf_trend = row.get('htf_trend', 0)
-            
-            # Ensure valid swings
-            if pd.isna(row['last_swing_high']) or pd.isna(row['last_swing_low']):
-                continue
-                
-            sh = row['last_swing_high']
-            sl = row['last_swing_low']
-            swing_range = sh - sl
-            
-            if swing_range <= 0:
-                continue
-                
-            if htf_trend == 1:
-                # Uptrend HTF. We look for a retracement down.
-                # Assuming the last swing was an impulse UP (Swing Low -> Swing High)
-                # Fib level is measured from High down to Low
-                entry_level = sh - (swing_range * fib_level)
-                
-                # If price retraces down and touches entry_level
-                if row['low'] <= entry_level and row['open'] > entry_level:
-                    sl_dist = entry_level - sl
-                    if sl_dist > 0:
-                        position_size = (initial_balance * risk_per_trade) / sl_dist
-                        in_position = True
-                        position_type = 1
-                        entry_price = entry_level
-                        sl_price = sl # Stop loss at swing low
-                        tp_price = sh # Take profit at swing high
-                        entry_time = index
-                        # print(f"[{index}] OPEN LONG at {entry_level:.4f} | Size: {position_size:.2f} | Risk: ${(balance * risk_per_trade):.2f}")
-                    
-            elif htf_trend == -1:
-                # Downtrend HTF. Look for retracement up.
-                # Assuming the last swing was an impulse DOWN (Swing High -> Swing Low)
-                # Fib level is measured from Low up to High
-                entry_level = sl + (swing_range * fib_level)
-                
-                # If price retraces up and touches entry_level
-                if row['high'] >= entry_level and row['open'] < entry_level:
-                    sl_dist = sh - entry_level
-                    if sl_dist > 0:
-                        position_size = (initial_balance * risk_per_trade) / sl_dist
-                        in_position = True
-                        position_type = -1
-                        entry_price = entry_level
-                        sl_price = sh # Stop loss at swing high
-                        tp_price = sl # Take profit at swing low
-                        entry_time = index
-                        # print(f"[{index}] OPEN SHORT at {entry_level:.4f} | Size: {position_size:.2f} | Risk: ${(balance * risk_per_trade):.2f}")
+            if use_refined_setups and ('entry_level' in df.columns) and ('setup_id' in df.columns) and ('setup_dir' in df.columns):
+                sid = row.get('setup_id', np.nan)
+                sdir = row.get('setup_dir', np.nan)
+                entry_level = row.get('entry_level', np.nan)
+                sl_level = row.get('sl_level', np.nan)
+                tp_level = row.get('tp_level', np.nan)
+
+                if (
+                    pd.notna(sid)
+                    and pd.notna(sdir)
+                    and pd.notna(entry_level)
+                    and pd.notna(sl_level)
+                    and pd.notna(tp_level)
+                    and (sid not in used_setup_ids)
+                    and (replace_pending_on_new_setup or not pending)
+                    and ((not pending) or (pending_setup_id != sid))
+                ):
+                    pending = True
+                    pending_setup_id = sid
+                    pending_dir = int(sdir)
+                    pending_entry = float(entry_level)
+                    pending_sl = float(sl_level)
+                    pending_tp = float(tp_level)
+                    pending_since_i = i
+                    pending_active_from_i = i + 1
+                    used_setup_ids.add(sid)
+
+            if pending and (pending_since_i is not None) and (max_pending_bars is not None) and ((i - pending_since_i) > max_pending_bars):
+                pending = False
+                pending_setup_id = None
+                pending_since_i = None
+                pending_active_from_i = None
+
+            if pending and not in_position and (pending_active_from_i is None or i >= pending_active_from_i):
+                if pending_dir == 1:
+                    if row['low'] <= pending_entry:
+                        execution_entry = pending_entry + entry_cost_points
+                        sl_dist = execution_entry - pending_sl
+                        if sl_dist > 0:
+                            base_balance = initial_balance if risk_base == "initial" else balance
+                            min_sl_dist = float(min_sl_points) * point_value
+                            safe_sl_dist = max(sl_dist, min_sl_dist) if min_sl_dist > 0 else sl_dist
+                            position_size = (base_balance * risk_per_trade) / safe_sl_dist
+                            in_position = True
+                            position_type = 1
+                            entry_price = execution_entry
+                            sl_price = pending_sl
+                            tp_price = pending_tp
+                            entry_time = index
+                        pending = False
+                        pending_setup_id = None
+                        pending_since_i = None
+                        pending_active_from_i = None
+                        if in_position:
+                            if row['low'] <= sl_price:
+                                execution_exit = sl_price - exit_cost_points
+                                pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
+                                balance += pnl
+                                trades.append({
+                                    'entry_time': entry_time,
+                                    'exit_time': index,
+                                    'type': 'Long',
+                                    'entry': entry_price,
+                                    'tp_price': tp_price,
+                                    'sl_price': sl_price,
+                                    'exit': execution_exit,
+                                    'pnl': pnl,
+                                    'result': 'Loss'
+                                })
+                                in_position = False
+                            elif allow_entry_bar_tp and (row['high'] >= tp_price):
+                                if both_hit_policy == "sl" and (row['low'] <= sl_price):
+                                    pass
+                                else:
+                                    execution_exit = tp_price - exit_cost_points
+                                    pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
+                                    balance += pnl
+                                    trades.append({
+                                        'entry_time': entry_time,
+                                        'exit_time': index,
+                                        'type': 'Long',
+                                        'entry': entry_price,
+                                        'tp_price': tp_price,
+                                        'sl_price': sl_price,
+                                        'exit': execution_exit,
+                                        'pnl': pnl,
+                                        'result': 'Win'
+                                    })
+                                    in_position = False
+                    else:
+                        pass
+                else:
+                    if row['high'] >= pending_entry:
+                        execution_entry = pending_entry - entry_cost_points
+                        sl_dist = pending_sl - execution_entry
+                        if sl_dist > 0:
+                            base_balance = initial_balance if risk_base == "initial" else balance
+                            min_sl_dist = float(min_sl_points) * point_value
+                            safe_sl_dist = max(sl_dist, min_sl_dist) if min_sl_dist > 0 else sl_dist
+                            position_size = (base_balance * risk_per_trade) / safe_sl_dist
+                            in_position = True
+                            position_type = -1
+                            entry_price = execution_entry
+                            sl_price = pending_sl
+                            tp_price = pending_tp
+                            entry_time = index
+                        pending = False
+                        pending_setup_id = None
+                        pending_since_i = None
+                        pending_active_from_i = None
+                        if in_position:
+                            if row['high'] >= sl_price:
+                                execution_exit = sl_price + exit_cost_points
+                                pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
+                                balance += pnl
+                                trades.append({
+                                    'entry_time': entry_time,
+                                    'exit_time': index,
+                                    'type': 'Short',
+                                    'entry': entry_price,
+                                    'tp_price': tp_price,
+                                    'sl_price': sl_price,
+                                    'exit': execution_exit,
+                                    'pnl': pnl,
+                                    'result': 'Loss'
+                                })
+                                in_position = False
+                            elif allow_entry_bar_tp and (row['low'] <= tp_price):
+                                if both_hit_policy == "sl" and (row['high'] >= sl_price):
+                                    pass
+                                else:
+                                    execution_exit = tp_price + exit_cost_points
+                                    pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
+                                    balance += pnl
+                                    trades.append({
+                                        'entry_time': entry_time,
+                                        'exit_time': index,
+                                        'type': 'Short',
+                                        'entry': entry_price,
+                                        'tp_price': tp_price,
+                                        'sl_price': sl_price,
+                                        'exit': execution_exit,
+                                        'pnl': pnl,
+                                        'result': 'Win'
+                                    })
+                                    in_position = False
+                    else:
+                        pass
+            elif (not pending) and (not in_position):
+                htf_trend = row.get('htf_trend', 0)
+                if pd.isna(row.get('last_swing_high', np.nan)) or pd.isna(row.get('last_swing_low', np.nan)):
+                    pass
+                else:
+                    sh = row['last_swing_high']
+                    sl = row['last_swing_low']
+                    swing_range = sh - sl
+                    if swing_range > 0:
+                        if htf_trend == 1:
+                            entry_level = sh - (swing_range * fib_level)
+                            if row['low'] <= entry_level and row['open'] > entry_level:
+                                execution_entry = entry_level + entry_cost_points
+                                sl_dist = execution_entry - sl
+                                if sl_dist > 0:
+                                    base_balance = initial_balance if risk_base == "initial" else balance
+                                    min_sl_dist = float(min_sl_points) * point_value
+                                    safe_sl_dist = max(sl_dist, min_sl_dist) if min_sl_dist > 0 else sl_dist
+                                    position_size = (base_balance * risk_per_trade) / safe_sl_dist
+                                    in_position = True
+                                    position_type = 1
+                                    entry_price = execution_entry
+                                    sl_price = sl
+                                    tp_price = sh
+                                    entry_time = index
+                        elif htf_trend == -1:
+                            entry_level = sl + (swing_range * fib_level)
+                            if row['high'] >= entry_level and row['open'] < entry_level:
+                                execution_entry = entry_level - entry_cost_points
+                                sl_dist = sh - execution_entry
+                                if sl_dist > 0:
+                                    base_balance = initial_balance if risk_base == "initial" else balance
+                                    min_sl_dist = float(min_sl_points) * point_value
+                                    safe_sl_dist = max(sl_dist, min_sl_dist) if min_sl_dist > 0 else sl_dist
+                                    position_size = (base_balance * risk_per_trade) / safe_sl_dist
+                                    in_position = True
+                                    position_type = -1
+                                    entry_price = execution_entry
+                                    sl_price = sh
+                                    tp_price = sl
+                                    entry_time = index
 
         # Track floating equity
         floating_pnl = 0
@@ -427,9 +615,13 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
     # Close any open position at the end
     if in_position:
         last_price = df.iloc[-1]['close']
-        pnl = (last_price - entry_price) * position_size if position_type == 1 else (entry_price - last_price) * position_size
+        if position_type == 1:
+            execution_exit = float(last_price) - exit_cost_points
+            pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
+        else:
+            execution_exit = float(last_price) + exit_cost_points
+            pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
         balance += pnl
-        # print(f"[{df.index[-1]}] CLOSED {'LONG' if position_type == 1 else 'SHORT'} at {last_price:.4f} (End of Backtest) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
         trades.append({
             'entry_time': entry_time,
             'exit_time': df.index[-1],
@@ -437,7 +629,7 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
             'entry': entry_price,
             'tp_price': np.nan,
             'sl_price': np.nan,
-            'exit': last_price,
+            'exit': execution_exit,
             'pnl': pnl,
             'result': 'Open/Closed at End'
         })
@@ -496,6 +688,10 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
         # New Metrics: Total Return
         total_return_pct = (balance - initial_balance) / initial_balance
 
+        gross_profit = trades_df.loc[trades_df['pnl'] > 0, 'pnl'].sum()
+        gross_loss = -trades_df.loc[trades_df['pnl'] < 0, 'pnl'].sum()
+        profit_factor = (gross_profit / gross_loss) if gross_loss > 0 else float('inf')
+
         # Max consecutive take profit wins in a row
         max_consecutive_tp_wins = 0
         current_streak = 0
@@ -538,7 +734,7 @@ def run_backtest(df, initial_balance=10000.0, risk_per_trade=0.01, fib_level=0.6
         print(f"Max Drawdown: {max_drawdown:.2%}")
         print(f"Sharpe Ratio: {sharpe_ratio:.2f}")
         print(f"Ann. Std Dev: {annualized_std:.2%}")
-        print(f"Profit Factor: {total_pnl / (abs(trades_df['pnl'].sum()) if trades_df['pnl'].sum() != 0 else 1):.2f}")
+        print(f"Profit Factor: {profit_factor:.2f}")
         print(f"Num Trades / DD > 10% Episodes: {total_trades / num_dd_episodes if num_dd_episodes > 0 else float('inf'):.2f}")
         print(f"Drawdown >10% Episodes: {num_dd_episodes}")
         print(f"Prop Firm Challenge (+15% before -8%): {prop_firm_passes} Passes / {prop_firm_fails} Fails")

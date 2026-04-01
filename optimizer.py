@@ -2,7 +2,7 @@
 Parameter Optimizer for the Fibonacci + Market Structure Trading Bot.
 Sweeps across key parameter combinations and outputs a ranked comparison table.
 """
-from data_loader import initialize_mt5, get_data
+from data_loader import initialize_mt5, get_data, get_symbol_specs
 from strategy import find_swings, determine_trend
 from backtest import run_backtest
 from datetime import datetime, timedelta
@@ -36,7 +36,7 @@ def generate_signals_with_params(htf_df, etf_df, htf_window, etf_window, fib_lev
 
     htf_trend = htf[['trend']].rename(columns={'trend': 'htf_trend'})
     etf = etf.sort_index()
-    htf_trend = htf_trend.sort_index()
+    htf_trend = htf_trend.sort_index().shift(1)
 
     combined = pd.merge_asof(etf, htf_trend, left_index=True, right_index=True, direction='backward')
     combined['signal'] = 0
@@ -53,8 +53,20 @@ def silent_backtest(df, initial_balance, risk_per_trade, fib_level):
     old_stdout = sys.stdout
     sys.stdout = buffer = io.StringIO()
 
-    trades_df = run_backtest(df, initial_balance=initial_balance,
-                             risk_per_trade=risk_per_trade, fib_level=fib_level)
+    specs = get_symbol_specs(SYMBOL) or {}
+    point_value = float(specs.get("point") or 0.01)
+    spread_points = float(specs.get("spread") or 0.0)
+
+    trades_df = run_backtest(
+        df, 
+        initial_balance=initial_balance,
+        risk_per_trade=risk_per_trade, 
+        fib_level=fib_level,
+        spread_points=spread_points,
+        slippage_points=5,
+        commission_per_unit=0.07,
+        point_value=point_value
+    )
 
     output = buffer.getvalue()
     sys.stdout = old_stdout

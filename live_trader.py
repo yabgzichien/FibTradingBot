@@ -9,7 +9,7 @@ import numpy as np
 import MetaTrader5 as mt5
 
 from data_loader import initialize_mt5, get_data
-from strategy import generate_signals
+from strategy import generate_signals_refined
 
 # Configure standard logging to console and file
 logging.basicConfig(
@@ -22,14 +22,14 @@ logging.basicConfig(
 )
 
 # ── Configuration ─────────────────────────────────────────────────────────────
-SYMBOL = "BTCUSD"
+SYMBOL = input("Enter trading symbol (e.g. BTCUSD, XAUUSD): ").upper() or "BTCUSD"
 HTF = "H4"
 ETF = "M15"
 
 # Rank 1 Strategy Parameters
-FIB_LEVEL = 0.786
 HTF_WINDOW = 7
 ETF_WINDOW = 3
+ENTRY_RETRACEMENT = 0.71
 
 # Risk Management
 INITIAL_BALANCE = 10000.0
@@ -42,6 +42,7 @@ POLL_INTERVAL_SEC = 60  # Check every 1 minute
 ORDER_REPLACE_TOL_POINTS = 10  # Reuse existing pending if within this tolerance
 ETF_LOOKBACK_DAYS = 7          # How many days of M15 data to fetch
 HTF_WARMUP_DAYS = 60           # Extra H4 history for swing/trend warm-up
+ETF_WARMUP_CANDLES = 360       # 15M warmup candles (360 × 15min = 3.75 days)
 
 # ──────────────────────────────────────────────────────────────────────────────
 
@@ -358,7 +359,10 @@ def execute_trade(symbol, action, entry, sl, tp, risk_dollars):
                     "sl",
                     "tp",
                     "htf_trend",
-                    "entry_level_theoretical"
+                    "entry_level_theoretical",
+                    "pnl",
+                    "is_win",
+                    "status"
                 ])
             writer.writerow([
                 datetime.utcnow().isoformat(),
@@ -372,6 +376,9 @@ def execute_trade(symbol, action, entry, sl, tp, risk_dollars):
                 # We cannot easily access htf_trend here; store 0 as placeholder.
                 0,
                 float(entry),
+                "",
+                "",
+                "PENDING"
             ])
     except Exception as e:
         logging.error(f"Failed to append live trade to CSV: {e}")
@@ -401,9 +408,11 @@ def analyze_and_trade():
     end_date = datetime.utcnow()
     etf_start = end_date - timedelta(days=ETF_LOOKBACK_DAYS)
     htf_start = end_date - timedelta(days=ETF_LOOKBACK_DAYS + HTF_WARMUP_DAYS)
+    etf_warmup_td = timedelta(minutes=ETF_WARMUP_CANDLES * 15)
+    etf_fetch_start = etf_start - etf_warmup_td  # Fetch extra M15 history for warmup
 
     htf_data = get_data(SYMBOL, HTF, htf_start, end_date)
-    etf_data = get_data(SYMBOL, ETF, etf_start, end_date)
+    etf_data = get_data(SYMBOL, ETF, etf_fetch_start, end_date)
     
     if htf_data is None or etf_data is None:
         logging.error("Failed to fetch data.")
@@ -411,82 +420,151 @@ def analyze_and_trade():
         
     # Generate signals
     try:
-        strategy_df = generate_signals(htf_data, etf_data, FIB_LEVEL)
+        strategy_df = generate_signals_refined(
+            htf_data,
+            etf_data,
+            anchor_swing_window=HTF_WINDOW,
+            execution_swing_window=ETF_WINDOW,
+            entry_retracement=ENTRY_RETRACEMENT
+        )
     except Exception as e:
         logging.error(f"Strategy generation failed: {e}")
         return
+
+    # Trim warmup: only keep rows from the actual lookback start onwards
+    strategy_df = strategy_df[strategy_df.index >= pd.Timestamp(etf_start)]
         
     # Get the MOST RECENT closed candle state
     if len(strategy_df) < 2:
         return
         
-    # Use the most recently CLOSED ETF candle (avoid using the still-forming bar)
     current_row = strategy_df.iloc[-2]
-    
-    htf_trend = current_row.get('htf_trend', 0)
-    sh = current_row['last_swing_high']
-    sl = current_row['last_swing_low']
-    
-    # Are we in a trend?
-    if htf_trend == 0 or pd.isna(sh) or pd.isna(sl):
-        cancel_all_bot_pending_orders(SYMBOL, MAGIC_NUMBER, reason="no valid trend/swing setup")
-        logging.info("Market is ranging or establishing swings. No trade.")
+    entry_level = current_row.get('entry_level', np.nan)
+    setup_dir = current_row.get('setup_dir', np.nan)
+    sl_level = current_row.get('sl_level', np.nan)
+    tp_level = current_row.get('tp_level', np.nan)
+    entry_in_fvg = bool(current_row.get('entry_in_fvg', False))
+
+    if pd.isna(entry_level) or pd.isna(setup_dir) or pd.isna(sl_level) or pd.isna(tp_level):
+        cancel_all_bot_pending_orders(SYMBOL, MAGIC_NUMBER, reason="no valid sweep/BOS setup")
+        logging.info("No valid setup. Waiting.")
+        return
+
+    bid, ask = get_current_price(SYMBOL)
+    if bid is None:
+        return
+
+    action = 1 if int(setup_dir) == 1 else -1
+    logging.info(
+        f"Placing setup. Dir={'BUY' if action == 1 else 'SELL'} Entry={float(entry_level):.2f} "
+        f"SL={float(sl_level):.2f} TP={float(tp_level):.2f} EntryInFVG={entry_in_fvg} "
+        f"CurrentBid={bid:.2f} CurrentAsk={ask:.2f}"
+    )
+    sync_pending_order(SYMBOL, action, float(entry_level), float(sl_level), float(tp_level), RISK_DOLLARS)
+
+def update_trade_results():
+    """
+    Reads live_trades.csv, checks the status of active/pending trades,
+    and updates their PNL and is_win status if they are closed.
+    """
+    csv_path = "live_trades.csv"
+    if not os.path.exists(csv_path):
         return
         
-    swing_range = sh - sl
-    if swing_range <= 0:
-        cancel_all_bot_pending_orders(SYMBOL, MAGIC_NUMBER, reason="invalid swing range")
-        return
-        
-    # Evaluate/plan entry based on current HTF trend and latest swing structure.
-    # In limit-order mode, we place a resting order at fib entry level.
-    if htf_trend == 1:
-        # Uptrend: plan BUY_LIMIT at fib retracement level.
-        entry_level = sh - (swing_range * FIB_LEVEL)
-        bid, ask = get_current_price(SYMBOL)
-        if bid is None:
-            return
-
-        # If price is already below/at entry, BUY_LIMIT is no longer appropriate.
-        if entry_level >= ask:
-            cancel_all_bot_pending_orders(
-                SYMBOL, MAGIC_NUMBER, reason="buy limit no longer placeable at current price"
-            )
-            logging.info(
-                f"Uptrend setup found, but BUY_LIMIT not placeable now. "
-                f"Entry={entry_level:.2f} is not below Ask={ask:.2f}. Waiting for refreshed structure."
-            )
-            return
-
-        logging.info(
-            f"Placing BUY_LIMIT setup. Entry={entry_level:.2f}, SL={sl:.2f}, TP={sh:.2f}, "
-            f"CurrentBid={bid:.2f}, CurrentAsk={ask:.2f}"
-        )
-        sync_pending_order(SYMBOL, 1, entry_level, sl, sh, RISK_DOLLARS)
+    try:
+        updated = False
+        rows = []
+        with open(csv_path, "r", newline="") as f:
+            reader = csv.reader(f)
+            header = next(reader, None)
+            if header is None:
+                return
+                
+            if "pnl" not in header:
+                header.extend(["pnl", "is_win", "status"])
+                updated = True
+                
+            rows.append(header)
             
-    elif htf_trend == -1:
-        # Downtrend: plan SELL_LIMIT at fib retracement level.
-        entry_level = sl + (swing_range * FIB_LEVEL)
-        bid, ask = get_current_price(SYMBOL)
-        if bid is None:
-            return
-
-        # If price is already above/at entry, SELL_LIMIT is no longer appropriate.
-        if entry_level <= bid:
-            cancel_all_bot_pending_orders(
-                SYMBOL, MAGIC_NUMBER, reason="sell limit no longer placeable at current price"
-            )
-            logging.info(
-                f"Downtrend setup found, but SELL_LIMIT not placeable now. "
-                f"Entry={entry_level:.2f} is not above Bid={bid:.2f}. Waiting for refreshed structure."
-            )
-            return
-
-        logging.info(
-            f"Placing SELL_LIMIT setup. Entry={entry_level:.2f}, SL={sh:.2f}, TP={sl:.2f}, "
-            f"CurrentBid={bid:.2f}, CurrentAsk={ask:.2f}"
-        )
-        sync_pending_order(SYMBOL, -1, entry_level, sh, sl, RISK_DOLLARS)
+            try:
+                pnl_idx = header.index("pnl")
+                is_win_idx = header.index("is_win")
+                status_idx = header.index("status")
+                ticket_idx = header.index("ticket")
+            except ValueError:
+                return
+            
+            for row in reader:
+                while len(row) < len(header):
+                    row.append("")
+                    
+                if row[status_idx] in ["CLOSED", "CANCELED"]:
+                    rows.append(row)
+                    continue
+                    
+                ticket_str = row[ticket_idx]
+                if not ticket_str.isdigit():
+                    rows.append(row)
+                    continue
+                    
+                ticket = int(ticket_str)
+                pos_id = ticket
+                
+                # Check if position is closed
+                deals = mt5.history_deals_get(position=pos_id)
+                if deals and len(deals) > 0:
+                    out_deals = [d for d in deals if d.entry == mt5.DEAL_ENTRY_OUT]
+                    if out_deals:
+                        total_profit = sum([float(d.profit + d.commission + d.swap) for d in deals])
+                        row[pnl_idx] = f"{total_profit:.2f}"
+                        row[is_win_idx] = "True" if total_profit > 0 else "False"
+                        row[status_idx] = "CLOSED"
+                        updated = True
+                        rows.append(row)
+                        continue
+                        
+                # Check active positions
+                active_positions = mt5.positions_get(ticket=pos_id)
+                if active_positions and len(active_positions) > 0:
+                    if row[status_idx] != "OPEN":
+                        row[status_idx] = "OPEN"
+                        updated = True
+                    rows.append(row)
+                    continue
+                    
+                # Check active orders
+                active_orders = mt5.orders_get(ticket=ticket)
+                if active_orders and len(active_orders) > 0:
+                    if row[status_idx] != "PENDING":
+                        row[status_idx] = "PENDING"
+                        updated = True
+                    rows.append(row)
+                    continue
+                    
+                # Check history orders (canceled/expired before triggering)
+                hist_orders = mt5.history_orders_get(ticket=ticket)
+                if hist_orders and len(hist_orders) > 0:
+                    ho = hist_orders[0]
+                    if ho.state in (mt5.ORDER_STATE_CANCELED, mt5.ORDER_STATE_EXPIRED, mt5.ORDER_STATE_REJECTED):
+                        row[status_idx] = "CANCELED"
+                        row[pnl_idx] = "0.00"
+                        row[is_win_idx] = "False"
+                        updated = True
+                        rows.append(row)
+                        continue
+                        
+                rows.append(row)
+                
+        if updated:
+            # Atomic replacement to prevent corruption
+            temp_path = csv_path + ".tmp"
+            with open(temp_path, "w", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerows(rows)
+            os.replace(temp_path, csv_path)
+            
+    except Exception as e:
+        logging.error(f"Error updating trade results in CSV: {e}")
 
 def main():
     logging.info("Starting Live Trader Bot...")
@@ -494,10 +572,11 @@ def main():
     while True:
         try:
             analyze_and_trade()
+            update_trade_results()
         except Exception as e:
             logging.error(f"Fatal error in main loop: {e}")
         
-        logging.info("Pairs: BTCUSD")
+        logging.info(f"Pairs:{SYMBOL}")
         logging.info(f"Sleeping for {POLL_INTERVAL_SEC / 60} minutes...")
         time.sleep(POLL_INTERVAL_SEC)
 

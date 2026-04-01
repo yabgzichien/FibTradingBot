@@ -38,3 +38,16 @@ def get_data(symbol, timeframe, start_date, end_date):
     df['time'] = pd.to_datetime(df['time'], unit='s')
     df.set_index('time', inplace=True)
     return df
+
+
+def get_symbol_specs(symbol: str):
+    info = mt5.symbol_info(symbol)
+    if info is None:
+        return None
+    return {
+        "point": float(getattr(info, "point", 0.0) or 0.0),
+        "spread": float(getattr(info, "spread", 0.0) or 0.0),
+        "trade_contract_size": float(getattr(info, "trade_contract_size", 0.0) or 0.0),
+        "trade_tick_size": float(getattr(info, "trade_tick_size", 0.0) or 0.0),
+        "trade_tick_value": float(getattr(info, "trade_tick_value", 0.0) or 0.0),
+    }
