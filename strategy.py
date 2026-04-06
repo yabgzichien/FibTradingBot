@@ -119,7 +119,8 @@ def generate_signals_refined(
     require_bias=True,
     sweep_lookback_bars=32,
     internal_structure_lookback_bars=16,
-    max_bos_wait_bars=48
+    max_bos_wait_bars=48,
+    max_pending_bars=96
 ):
     """
     Refined strategy:
@@ -357,5 +358,9 @@ def generate_signals_refined(
 
                 next_setup_id += 1
                 active = None
+
+    if max_pending_bars is not None and max_pending_bars > 0:
+        cols_to_ffill = ['setup_id', 'setup_dir', 'entry_level', 'sl_level', 'tp_level']
+        combined[cols_to_ffill] = combined[cols_to_ffill].ffill(limit=max_pending_bars)
 
     return combined

@@ -16,7 +16,7 @@ def main():
         print("Invalid input for days, using default 3.")
         days = 3
     
-    anchor_tf = "H1"
+    anchor_tf = "H4"
     etf = "M15"
     entry_retracement = 0.618
     htf_warmup_days = 60  # Extra lookback so H4 swings/trend are fully initialised

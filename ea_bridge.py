@@ -1,0 +1,282 @@
+import os
+import time
+import csv
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+
+import pandas as pd
+
+from strategy import generate_signals_refined
+
+
+@dataclass(frozen=True)
+class BridgeConfig:
+    symbols: tuple[str, ...] = ("BTCUSD", "XAUUSD")
+    anchor_tf: str = "H4"
+    execution_tf: str = "M15"
+    poll_interval_sec: int = 60
+    bars_limit: int = 1200
+    risk_base_balance_usd: float = 10000.0
+    risk_per_trade_pct: float = 0.01
+    magic: int = 1001001
+    replace_tol_points: float = 10.0
+    max_pending_bars: int = 96
+    anchor_swing_window: int = 7
+    execution_swing_window: int = 1
+    entry_retracement: float = 0.618
+    sweep_mode: str = "prev_bar"
+    internal_structure_lookback_bars: int = 1
+    max_bos_wait_bars: int = 8
+
+
+def _log(msg: str):
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    print(f"{ts} [ea_bridge] {msg}", flush=True)
+
+
+def _common_files_dir() -> str:
+    appdata = os.environ.get("APPDATA", "")
+    if not appdata:
+        return ""
+    return os.path.join(appdata, "MetaQuotes", "Terminal", "Common", "Files")
+
+
+def _rates_path(symbol: str, timeframe: str) -> str:
+    base = _common_files_dir()
+    return os.path.join(base, f"ag_rates_{symbol}_{timeframe}.csv")
+
+
+def _commands_path() -> str:
+    base = _common_files_dir()
+    return os.path.join(base, "ag_commands.csv")
+
+
+def _ensure_commands_file():
+    path = _commands_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    if os.path.exists(path):
+        _log(f"Commands file exists: {path}")
+        return
+    fieldnames = [
+        "ts",
+        "symbol",
+        "cmd",
+        "dir",
+        "entry",
+        "sl",
+        "tp",
+        "risk_usd",
+        "magic",
+        "replace_tol_points",
+        "max_pending_bars",
+        "client_tag",
+    ]
+    with open(path, "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        w.writeheader()
+    _log(f"Commands file created: {path}")
+
+
+
+def _read_rates_csv(path: str) -> pd.DataFrame:
+    if not os.path.exists(path):
+        return pd.DataFrame()
+    encodings = []
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+        if head.startswith(b"\xff\xfe") or head.startswith(b"\xfe\xff"):
+            encodings.append("utf-16")
+        elif head.startswith(b"\xef\xbb\xbf"):
+            encodings.append("utf-8-sig")
+    except Exception:
+        pass
+    encodings.extend(["utf-8", "utf-8-sig", "utf-16", "cp1252"])
+
+    df = None
+    last_err = None
+    for _ in range(3):
+        for enc in encodings:
+            try:
+                df = pd.read_csv(path, encoding=enc, sep=None, engine="python")
+                last_err = None
+                break
+            except UnicodeDecodeError as e:
+                last_err = e
+                continue
+            except pd.errors.EmptyDataError:
+                return pd.DataFrame()
+            except pd.errors.ParserError as e:
+                last_err = e
+                continue
+        if df is not None and last_err is None:
+            break
+        time.sleep(0.1)
+    if df is None:
+        if last_err is not None:
+            raise last_err
+        return pd.DataFrame()
+    if df.empty:
+        return df
+    if "time" not in df.columns:
+        return pd.DataFrame()
+    if pd.api.types.is_numeric_dtype(df["time"]):
+        df["time"] = pd.to_datetime(df["time"], unit="s", utc=True, errors="coerce")
+    else:
+        df["time"] = pd.to_datetime(df["time"], utc=True, errors="coerce")
+    df = df.dropna(subset=["time"]).set_index("time").sort_index()
+    cols = ["open", "high", "low", "close"]
+    for c in cols:
+        if c not in df.columns:
+            return pd.DataFrame()
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+    df = df.dropna(subset=cols)
+    return df
+
+
+def _append_command(row: dict):
+    path = _commands_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    exists = os.path.exists(path)
+    fieldnames = [
+        "ts",
+        "symbol",
+        "cmd",
+        "dir",
+        "entry",
+        "sl",
+        "tp",
+        "risk_usd",
+        "magic",
+        "replace_tol_points",
+        "max_pending_bars",
+        "client_tag",
+    ]
+    with open(path, "a", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames)
+        if not exists:
+            w.writeheader()
+        w.writerow(row)
+    _log(
+        f"Command written: symbol={row.get('symbol')} cmd={row.get('cmd')} dir={row.get('dir')} "
+        f"entry={row.get('entry')} sl={row.get('sl')} tp={row.get('tp')} tag={row.get('client_tag')}"
+    )
+
+
+def _latest_setup(df: pd.DataFrame):
+    if df is None or df.empty or len(df) < 2:
+        return None
+    row = df.iloc[-2]
+    setup_id = row.get("setup_id", None)
+    entry_level = row.get("entry_level", None)
+    setup_dir = row.get("setup_dir", None)
+    sl_level = row.get("sl_level", None)
+    tp_level = row.get("tp_level", None)
+    if pd.isna(setup_id) or pd.isna(entry_level) or pd.isna(setup_dir) or pd.isna(sl_level) or pd.isna(tp_level):
+        return None
+    return int(setup_id), int(setup_dir), float(entry_level), float(sl_level), float(tp_level)
+
+
+def run_bridge(config: BridgeConfig):
+    common_dir = _common_files_dir()
+    if not common_dir or not os.path.isdir(common_dir):
+        raise RuntimeError(f"MT5 Common Files folder not found: {common_dir}")
+
+    _log(f"Common Files: {common_dir}")
+    _log(
+        "Config: "
+        f"symbols={','.join(config.symbols)} anchor_tf={config.anchor_tf} exec_tf={config.execution_tf} "
+        f"poll={config.poll_interval_sec}s bars_limit={config.bars_limit} magic={config.magic}"
+    )
+    _ensure_commands_file()
+    last_sent_setup = {}
+
+    while True:
+        cycle_ts = datetime.now(timezone.utc).isoformat()
+        _log("Cycle start")
+        for symbol in config.symbols:
+            anchor_path = _rates_path(symbol, config.anchor_tf)
+            exec_path = _rates_path(symbol, config.execution_tf)
+            rates_anchor = _read_rates_csv(anchor_path)
+            rates_exec = _read_rates_csv(exec_path)
+            if rates_anchor.empty or rates_exec.empty:
+                _log(
+                    f"{symbol}: missing/empty rates "
+                    f"anchor_rows={len(rates_anchor)} exec_rows={len(rates_exec)} "
+                    f"anchor_file={os.path.basename(anchor_path)} exec_file={os.path.basename(exec_path)}"
+                )
+                continue
+
+            if config.bars_limit is not None and config.bars_limit > 0:
+                rates_anchor = rates_anchor.iloc[-config.bars_limit :]
+                rates_exec = rates_exec.iloc[-config.bars_limit :]
+
+            df = generate_signals_refined(
+                rates_anchor,
+                rates_exec,
+                anchor_swing_window=config.anchor_swing_window,
+                execution_swing_window=config.execution_swing_window,
+                entry_retracement=config.entry_retracement,
+                sweep_mode=config.sweep_mode,
+                internal_structure_lookback_bars=config.internal_structure_lookback_bars,
+                max_bos_wait_bars=config.max_bos_wait_bars,
+                max_pending_bars=config.max_pending_bars,
+            )
+
+            setup = _latest_setup(df)
+            if setup is None:
+                if last_sent_setup.get(symbol) == "CANCEL":
+                    continue
+                _log(
+                    f"{symbol}: no setup "
+                    f"anchor_last={rates_anchor.index[-1].isoformat()} exec_last={rates_exec.index[-1].isoformat()}"
+                )
+                cmd = {
+                    "ts": cycle_ts,
+                    "symbol": symbol,
+                    "cmd": "CANCEL_ALL",
+                    "dir": "",
+                    "entry": "",
+                    "sl": "",
+                    "tp": "",
+                    "risk_usd": "",
+                    "magic": str(config.magic),
+                    "replace_tol_points": str(config.replace_tol_points),
+                    "max_pending_bars": str(config.max_pending_bars),
+                    "client_tag": "py",
+                }
+                _append_command(cmd)
+                last_sent_setup[symbol] = "CANCEL"
+                continue
+
+            setup_id, setup_dir, entry, sl, tp = setup
+            _log(
+                f"{symbol}: setup_id={setup_id} dir={setup_dir} entry={entry:.5f} sl={sl:.5f} tp={tp:.5f} "
+                f"anchor_last={rates_anchor.index[-1].isoformat()} exec_last={rates_exec.index[-1].isoformat()}"
+            )
+            if last_sent_setup.get(symbol) == setup_id:
+                continue
+            last_sent_setup[symbol] = setup_id
+
+            risk_usd = float(config.risk_base_balance_usd) * float(config.risk_per_trade_pct)
+            cmd = {
+                "ts": cycle_ts,
+                "symbol": symbol,
+                "cmd": "PLACE_LIMIT",
+                "dir": str(1 if setup_dir == 1 else -1),
+                "entry": f"{entry:.10f}",
+                "sl": f"{sl:.10f}",
+                "tp": f"{tp:.10f}",
+                "risk_usd": f"{risk_usd:.2f}",
+                "magic": str(config.magic),
+                "replace_tol_points": str(config.replace_tol_points),
+                "max_pending_bars": str(config.max_pending_bars),
+                "client_tag": f"py_setup_{setup_id}",
+            }
+            _append_command(cmd)
+
+        time.sleep(int(config.poll_interval_sec))
+
+
+if __name__ == "__main__":
+    run_bridge(BridgeConfig())
