@@ -34,11 +34,38 @@ def main():
         print("No valid symbols selected.")
         return
 
-    try:
-        days = int(input("Enter number of days for backtesting (default 3): ") or 3)
-    except ValueError:
-        print("Invalid input for days, using default 3.")
-        days = 3
+    print("\nSelect Date Range type:")
+    print("1. Specific number of days back from today")
+    print("2. Specific start and end dates (YYYY-MM-DD)")
+    date_choice = input("Enter choice (1-2) [default 1]: ").strip() or "1"
+    
+    end_date = datetime.utcnow()
+    etf_start = end_date - timedelta(days=3)  # Default
+    
+    if date_choice == "1":
+        try:
+            days = int(input("Enter number of days backward (default 3): ") or 3)
+            etf_start = end_date - timedelta(days=days)
+        except ValueError:
+            print("Invalid input, using default 3 days.")
+    elif date_choice == "2":
+        start_str = input("Enter Start Date (YYYY-MM-DD): ").strip()
+        end_str = input("Enter End Date (YYYY-MM-DD) [Leave blank for today]: ").strip()
+        
+        try:
+            etf_start = datetime.strptime(start_str, "%Y-%m-%d")
+        except ValueError:
+            print("Invalid start date format. Using default 3 days ago.")
+            
+        if end_str:
+            try:
+                end_date_parsed = datetime.strptime(end_str, "%Y-%m-%d")
+                # Move to end of the specified day
+                end_date = end_date_parsed.replace(hour=23, minute=59, second=59)
+            except ValueError:
+                print("Invalid end date format. Using today's current time.")
+                
+    want_replay = input("Generate Animated Visual Replay (Interactive Charting)? (y/n) [default n]: ").strip().lower() == 'y'
     
     anchor_tf = "H4"
     etf = "M15"
@@ -46,9 +73,7 @@ def main():
     htf_warmup_days = 60  # Extra lookback so H4 swings/trend are fully initialised
     etf_warmup_candles = 360  # 15M warmup candles (360 × 15min = 3.75 days)
 
-    end_date = datetime.utcnow()
-    etf_start = end_date - timedelta(days=days)
-    htf_start = end_date - timedelta(days=days + htf_warmup_days)  # H4 fetches further back
+    htf_start = etf_start - timedelta(days=htf_warmup_days)  # H4 fetches further back
     etf_warmup_td = timedelta(minutes=etf_warmup_candles * 15)
     etf_fetch_start = etf_start - etf_warmup_td  # Fetch extra M15 history for warmup
 
@@ -96,7 +121,7 @@ def main():
         print("----------------------------------------------------\n")
 
         print("Running Backtest...")
-        trades_df = run_backtest(
+        result = run_backtest(
             strategy_df, 
             initial_balance=10000.0, 
             risk_per_trade=0.01, 
@@ -104,8 +129,17 @@ def main():
             slippage_points=5,
             commission_per_unit=0.07,
             point_value=point_value,
-            symbol=symbol
+            symbol=symbol,
+            return_events=want_replay
         )
+
+        if want_replay:
+            trades_df, events = result
+            from visual_replay import generate_visual_replay
+            print("Generating Visual Replay HTML...")
+            generate_visual_replay(events, symbol)
+        else:
+            trades_df = result
 
         if not trades_df.empty:
             trades_df['symbol'] = symbol

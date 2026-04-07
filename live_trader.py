@@ -115,6 +115,25 @@ def get_bot_pending_orders(symbol, magic_number):
         return []
     return [o for o in orders if getattr(o, "magic", None) == magic_number]
 
+def get_last_traded_bos(symbol):
+    """Retrieve the BOS timestamp of the last executed setup to prevent duplicate trades."""
+    path = f"live_logs/last_bos_{symbol}.txt"
+    if os.path.exists(path):
+        with open(path, "r") as f:
+            content = f.read().strip()
+            if content:
+                try:
+                    return pd.Timestamp(content)
+                except Exception:
+                    pass
+    return pd.NaT
+
+def set_last_traded_bos(symbol, bos_time):
+    """Store the BOS timestamp of the most recent setup to prevent re-entry on the same setup."""
+    path = f"live_logs/last_bos_{symbol}.txt"
+    with open(path, "w") as f:
+        f.write(str(bos_time))
+
 
 def cancel_pending_order(order_ticket):
     """Cancel a pending order by ticket."""
@@ -478,12 +497,49 @@ def analyze_and_trade():
     setup_dir = current_row.get('setup_dir', np.nan)
     sl_level = current_row.get('sl_level', np.nan)
     tp_level = current_row.get('tp_level', np.nan)
+    bos_time = current_row.get('bos_time', pd.NaT)
     entry_in_fvg = bool(current_row.get('entry_in_fvg', False))
 
-    if pd.isna(setup_id) or pd.isna(entry_level) or pd.isna(setup_dir) or pd.isna(sl_level) or pd.isna(tp_level):
+    if pd.isna(setup_id) or pd.isna(entry_level) or pd.isna(setup_dir) or pd.isna(sl_level) or pd.isna(tp_level) or pd.isna(bos_time):
         cancel_all_bot_pending_orders(SYMBOL, MAGIC_NUMBER, reason="no valid sweep/BOS setup")
         logging.info("No valid setup. Waiting.")
         return
+
+    # Check for Exhaustion (Late Boot Syndrome):
+    # If the bot is started late, verify the setup hasn't ALREADY triggered in the past.
+    exhausted = False
+    if not pd.isna(bos_time):
+        check_df = etf_data[etf_data.index > bos_time]
+        for _, r in check_df.iterrows():
+            if setup_dir == 1 and r['low'] <= entry_level:
+                exhausted = True
+                break
+            elif setup_dir == -1 and r['high'] >= entry_level:
+                exhausted = True
+                break
+                
+    last_bos = get_last_traded_bos(SYMBOL)
+    current_pending = get_bot_pending_orders(SYMBOL, MAGIC_NUMBER)
+
+    if exhausted:
+        if current_pending:
+            cancel_all_bot_pending_orders(SYMBOL, MAGIC_NUMBER, reason="Setup already triggered historically. Canceling.")
+        if pd.isna(last_bos) or bos_time != last_bos:
+            logging.info(f"IGNORING setup_id={setup_id} - Already triggered/exhausted historically at bos_time={bos_time}")
+            set_last_traded_bos(SYMBOL, bos_time)
+        return
+
+    last_bos = get_last_traded_bos(SYMBOL)
+    current_pending = get_bot_pending_orders(SYMBOL, MAGIC_NUMBER)
+
+    if not pd.isna(last_bos) and bos_time == last_bos:
+        if not current_pending:
+            logging.info(f"Already traded this exact setup (BOS: {bos_time}). Waiting for a new signal.")
+            return
+        # If we DO have a pending order, let it continue to sync_pending_order
+    else:
+        if current_pending:
+            cancel_all_bot_pending_orders(SYMBOL, MAGIC_NUMBER, reason="New divergent setup detected; clearing old pendings.")
 
     bid, ask = get_current_price(SYMBOL)
     if bid is None:
@@ -503,7 +559,8 @@ def analyze_and_trade():
         f"SL={float(sl_level):.2f} TP={float(tp_level):.2f} EntryInFVG={entry_in_fvg} "
         f"CurrentBid={bid:.2f} CurrentAsk={ask:.2f}"
     )
-    sync_pending_order(SYMBOL, action, float(entry_level), float(sl_level), float(tp_level), risk_dollars)
+    if sync_pending_order(SYMBOL, action, float(entry_level), float(sl_level), float(tp_level), risk_dollars):
+        set_last_traded_bos(SYMBOL, bos_time)
 
 def update_trade_results():
     """

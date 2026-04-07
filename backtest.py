@@ -285,13 +285,15 @@ def run_backtest(
     min_sl_points=0.0,
     both_hit_policy="sl",
     allow_entry_bar_tp=True,
-    symbol="UNKNOWN"
+    symbol="UNKNOWN",
+    return_events=False
 ):
     """
     Runs an iterrows backtest with realistic costs (spread, slippage, commission).
     """
     balance = initial_balance
     trades = []
+    events = []
     
     # State tracking
     in_position = False
@@ -614,6 +616,32 @@ def run_backtest(
                 floating_pnl = (entry_price - row['close']) * position_size
         equity_curve.append({'time': index, 'equity': balance + floating_pnl})
 
+        if return_events:
+            events.append({
+                'time': int(index.timestamp()),
+                'open': float(row['open']),
+                'high': float(row['high']),
+                'low': float(row['low']),
+                'close': float(row['close']),
+                'equity': float(balance + floating_pnl),
+                'balance': float(balance),
+                'initial_balance': float(initial_balance),
+                'pending': {
+                    'active': bool(pending),
+                    'dir': int(pending_dir) if pending else 0,
+                    'entry': float(pending_entry) if pending else None,
+                    'sl': float(pending_sl) if pending else None,
+                    'tp': float(pending_tp) if pending else None
+                },
+                'position': {
+                    'active': bool(in_position),
+                    'type': int(position_type) if in_position else 0,
+                    'entry': float(entry_price) if in_position else None,
+                    'sl': float(sl_price) if in_position else None,
+                    'tp': float(tp_price) if in_position else None
+                }
+            })
+
     # Close any open position at the end
     if in_position:
         last_price = df.iloc[-1]['close']
@@ -651,6 +679,8 @@ def run_backtest(
     if not trades_df.empty:
         total_trades = len(trades_df)
         wins = len(trades_df[trades_df['result'] == 'Win'])
+        long_trades = len(trades_df[trades_df['type'] == 'Long'])
+        short_trades = len(trades_df[trades_df['type'] == 'Short'])
         win_rate = wins / total_trades if total_trades > 0 else 0
         total_pnl = trades_df['pnl'].sum()
         avg_trade_duration = trades_df['duration'].mean()
@@ -728,6 +758,8 @@ def run_backtest(
         
         print("\n--- Backtest Results ---")
         print(f"Total Trades: {total_trades}")
+        print(f"Long Trades: {long_trades}")
+        print(f"Short Trades: {short_trades}")
         print(f"Wins: {wins}")
         print(f"Win Rate: {win_rate:.2%}")
         print(f"Total PnL: ${total_pnl:.2f}")
@@ -779,6 +811,9 @@ def run_backtest(
                 f"Trade details saved to {alt_path} instead."
             )
 
+
+    if return_events:
+        return trades_df, events
     return trades_df
 
 

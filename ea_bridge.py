@@ -177,9 +177,10 @@ def _latest_setup(df: pd.DataFrame):
     setup_dir = row.get("setup_dir", None)
     sl_level = row.get("sl_level", None)
     tp_level = row.get("tp_level", None)
-    if pd.isna(setup_id) or pd.isna(entry_level) or pd.isna(setup_dir) or pd.isna(sl_level) or pd.isna(tp_level):
+    bos_time = row.get("bos_time", pd.NaT)
+    if pd.isna(setup_id) or pd.isna(entry_level) or pd.isna(setup_dir) or pd.isna(sl_level) or pd.isna(tp_level) or pd.isna(bos_time):
         return None
-    return int(setup_id), int(setup_dir), float(entry_level), float(sl_level), float(tp_level)
+    return int(setup_id), int(setup_dir), float(entry_level), float(sl_level), float(tp_level), bos_time
 
 
 def run_bridge(config: BridgeConfig):
@@ -254,13 +255,56 @@ def run_bridge(config: BridgeConfig):
                 last_sent_setup[symbol] = "CANCEL"
                 continue
 
-            setup_id, setup_dir, entry, sl, tp = setup
-            _log(
-                f"{symbol}: setup_id={setup_id} dir={setup_dir} entry={entry:.5f} sl={sl:.5f} tp={tp:.5f} "
-                f"anchor_last={rates_anchor.index[-1].isoformat()} exec_last={rates_exec.index[-1].isoformat()}"
-            )
-            if last_sent_setup.get(symbol) == setup_id:
+            setup_id, setup_dir, entry, sl, tp, bos_time = setup
+
+            def get_last_bos(sym):
+                path = os.path.join(common_dir, f"last_bos_{sym}.txt")
+                if os.path.exists(path):
+                    with open(path, "r") as f:
+                        content = f.read().strip()
+                        if content:
+                            try:
+                                return pd.Timestamp(content)
+                            except Exception:
+                                pass
+                return pd.NaT
+
+            def set_last_bos(sym, t):
+                path = os.path.join(common_dir, f"last_bos_{sym}.txt")
+                with open(path, "w") as f:
+                    f.write(str(t))
+
+            last_bos = get_last_bos(symbol)
+            if not pd.isna(last_bos) and bos_time == last_bos:
+                # We have already traded this exact historical setup.
                 continue
+
+            # Check for Exhaustion (Late Boot Syndrome):
+            # If the bot is started late, verify the setup hasn't ALREADY triggered in the past.
+            exhausted = False
+            if not pd.isna(bos_time):
+                check_df = rates_exec[rates_exec.index > bos_time]
+                for _, r in check_df.iterrows():
+                    if setup_dir == 1 and r['low'] <= entry:
+                        exhausted = True
+                        break
+                    elif setup_dir == -1 and r['high'] >= entry:
+                        exhausted = True
+                        break
+            
+            if exhausted:
+                _log(f"{symbol}: IGNORING setup_id={setup_id} - Already triggered/exhausted historically at bos_time={bos_time}")
+                set_last_bos(symbol, bos_time)
+                last_sent_setup[symbol] = setup_id
+                continue
+                
+            _log(
+                f"{symbol}: NEW SETUP setup_id={setup_id} dir={setup_dir} entry={entry:.5f} sl={sl:.5f} tp={tp:.5f} "
+                f"bos_time={bos_time} anchor_last={rates_anchor.index[-1].isoformat()} exec_last={rates_exec.index[-1].isoformat()}"
+            )
+            
+            # Persist to disk so that EA Bridge restarts don't re-trigger it
+            set_last_bos(symbol, bos_time)
             last_sent_setup[symbol] = setup_id
 
             risk_usd = float(config.risk_base_balance_usd) * float(config.risk_per_trade_pct)
