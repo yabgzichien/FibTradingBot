@@ -1,0 +1,53 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environments
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# User-specific / Local settings
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Project Results & Logs (Commonly excluded to keep repo size small)
+backtest_results/
+live_logs/
+*.log
+*.csv
+
+# MT5 Compiled Executables (Only commit source code .mq5)
+ea/*.ex5
+ea/*.ex4
+
+# OS Files
+.DS_Store
+Thumbs.db

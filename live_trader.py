@@ -12,11 +12,12 @@ from data_loader import initialize_mt5, get_data
 from strategy import generate_signals_refined
 
 # Configure standard logging to console and file
+os.makedirs("live_logs", exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[
-        logging.FileHandler("live_trader.log"),
+        logging.FileHandler("live_logs/live_trader.log"),
         logging.StreamHandler()
     ]
 )
@@ -356,7 +357,8 @@ def execute_trade(symbol, action, entry, sl, tp, risk_dollars):
 
     # Append basic trade information to CSV for later analysis
     try:
-        csv_path = "live_trades.csv"
+        os.makedirs("live_logs", exist_ok=True)
+        csv_path = "live_logs/live_trades.csv"
         file_exists = os.path.exists(csv_path)
         with open(csv_path, mode="a", newline="") as f:
             writer = csv.writer(f)
@@ -508,7 +510,7 @@ def update_trade_results():
     Reads live_trades.csv, checks the status of active/pending trades,
     and updates their PNL and is_win status if they are closed.
     """
-    csv_path = "live_trades.csv"
+    csv_path = "live_logs/live_trades.csv"
     if not os.path.exists(csv_path):
         return
         

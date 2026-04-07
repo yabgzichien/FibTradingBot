@@ -95,26 +95,31 @@ def _read_rates_csv(path: str) -> pd.DataFrame:
 
     df = None
     last_err = None
-    for _ in range(3):
+    for attempt in range(5):
         for enc in encodings:
             try:
-                df = pd.read_csv(path, encoding=enc, sep=None, engine="python")
+                # Use faster 'c' engine and explicit comma separator
+                df = pd.read_csv(path, encoding=enc, sep=',', engine='c', low_memory=False)
                 last_err = None
                 break
-            except UnicodeDecodeError as e:
+            except (UnicodeDecodeError, pd.errors.ParserError) as e:
                 last_err = e
                 continue
+            except (PermissionError, IOError) as e:
+                last_err = e
+                break # Wait for retry loop to sleep
             except pd.errors.EmptyDataError:
                 return pd.DataFrame()
-            except pd.errors.ParserError as e:
-                last_err = e
-                continue
+        
         if df is not None and last_err is None:
             break
-        time.sleep(0.1)
+        
+        _log(f"File access delay for {os.path.basename(path)} (attempt {attempt+1}/5): {last_err}")
+        time.sleep(0.5) # Increased sleep to give MT5 more time to release the lock
+    
     if df is None:
         if last_err is not None:
-            raise last_err
+            _log(f"Warning: Could not read {path} after 5 attempts: {last_err}")
         return pd.DataFrame()
     if df.empty:
         return df
@@ -275,6 +280,7 @@ def run_bridge(config: BridgeConfig):
             }
             _append_command(cmd)
 
+        _log("Cycle complete. Sleeping...")
         time.sleep(int(config.poll_interval_sec))
 
 

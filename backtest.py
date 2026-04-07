@@ -261,7 +261,8 @@ def plot_results(df, trades_df, symbol):
 </body>
 </html>"""
 
-    output_file = "backtest_plot.html"
+    os.makedirs("backtest_results", exist_ok=True)
+    output_file = f"backtest_results/backtest_plot_{symbol}.html"
     with open(output_file, 'w', encoding='utf-8') as f:
         f.write(html_content)
     print(f"Chart saved to {output_file}")
@@ -284,6 +285,7 @@ def run_backtest(
     min_sl_points=0.0,
     both_hit_policy="sl",
     allow_entry_bar_tp=True,
+    symbol="UNKNOWN"
 ):
     """
     Runs an iterrows backtest with realistic costs (spread, slippage, commission).
@@ -762,14 +764,15 @@ def run_backtest(
             'duration_minutes',
             'pnl'
         ]
-        out_path = "backtest_trades.csv"
+        os.makedirs("backtest_results", exist_ok=True)
+        out_path = f"backtest_results/backtest_trades_{symbol}.csv"
         try:
             trades_df.to_csv(out_path, columns=export_cols, index=False)
             print(f"Trade details saved to {out_path}")
         except PermissionError:
             # Windows commonly locks CSVs when opened in Excel.
             ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-            alt_path = f"backtest_trades_{ts}.csv"
+            alt_path = f"backtest_results/backtest_trades_{symbol}_{ts}.csv"
             trades_df.to_csv(alt_path, columns=export_cols, index=False)
             print(
                 f"Could not write to {out_path} (file may be open). "
@@ -819,6 +822,9 @@ def plot_return_distribution(final_balances, initial_balance=10000.0, output_fil
     plt.ylabel("Frequency")
     plt.grid(alpha=0.2)
     plt.tight_layout()
-    plt.savefig(output_file, dpi=120)
+    
+    os.makedirs("backtest_results", exist_ok=True)
+    full_output_path = os.path.join("backtest_results", output_file)
+    plt.savefig(full_output_path, dpi=120)
     plt.close()
-    print(f"Monte Carlo return distribution saved to {output_file}")
+    print(f"Monte Carlo return distribution saved to {full_output_path}")

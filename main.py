@@ -9,7 +9,31 @@ def main():
     if not initialize_mt5():
         return
 
-    symbol = input("Enter trading symbol (e.g. XAUUSD, BTCUSD): ").upper() or "XAUUSD"
+    print("Select pairs to backtest:")
+    print("1. XAUUSD")
+    print("2. BTCUSD")
+    print("3. XAUUSD + BTCUSD")
+    print("4. Others")
+    choice = input("Enter choice (1-4) [default 3]: ").strip() or "3"
+    
+    target_symbols = []
+    if choice == "1":
+        target_symbols = ["XAUUSD"]
+    elif choice == "2":
+        target_symbols = ["BTCUSD"]
+    elif choice == "3":
+        target_symbols = ["XAUUSD", "BTCUSD"]
+    elif choice == "4":
+        custom = input("Enter symbols separated by commas: ")
+        target_symbols = [s.strip().upper() for s in custom.split(",") if s.strip()]
+    else:
+        print("Invalid choice. Using default (XAUUSD + BTCUSD).")
+        target_symbols = ["XAUUSD", "BTCUSD"]
+
+    if not target_symbols:
+        print("No valid symbols selected.")
+        return
+
     try:
         days = int(input("Enter number of days for backtesting (default 3): ") or 3)
     except ValueError:
@@ -28,60 +52,94 @@ def main():
     etf_warmup_td = timedelta(minutes=etf_warmup_candles * 15)
     etf_fetch_start = etf_start - etf_warmup_td  # Fetch extra M15 history for warmup
 
-    print(f"Fetching {anchor_tf} data for {symbol} (with {htf_warmup_days}-day warm-up buffer)...")
-    htf_data = get_data(symbol, anchor_tf, htf_start, end_date)
+    all_trades_dfs = []
 
-    print(f"Fetching {etf} data for {symbol} (with {etf_warmup_candles}-candle warm-up buffer)...")
-    etf_data = get_data(symbol, etf, etf_fetch_start, end_date)
+    for symbol in target_symbols:
+        print(f"\n{'='*50}\nStarting backtest for {symbol}\n{'='*50}")
 
-    if htf_data.empty or etf_data.empty:
-        print("Error fetching data. Exiting.")
-        return
+        print(f"Fetching {anchor_tf} data for {symbol} (with {htf_warmup_days}-day warm-up buffer)...")
+        htf_data = get_data(symbol, anchor_tf, htf_start, end_date)
 
-    specs = get_symbol_specs(symbol) or {}
-    point_value = float(specs.get("point") or 0.01)
-    spread_points = float(specs.get("spread") or 0.0)
- 
-    print("Generating Signals...")
-    strategy_df = generate_signals_refined(
-        htf_data,
-        etf_data,
-        anchor_swing_window=7,
-        execution_swing_window=1,
-        entry_retracement=entry_retracement,
-        sweep_mode="prev_bar",
-        internal_structure_lookback_bars=1,
-        max_bos_wait_bars=8
-    )
+        print(f"Fetching {etf} data for {symbol} (with {etf_warmup_candles}-candle warm-up buffer)...")
+        etf_data = get_data(symbol, etf, etf_fetch_start, end_date)
 
-    # Trim warmup: only keep rows from the actual backtest start onwards
-    strategy_df = strategy_df[strategy_df.index >= pd.Timestamp(etf_start)]
+        if htf_data.empty or etf_data.empty:
+            print(f"Error fetching data for {symbol}. Skipping.")
+            continue
+
+        specs = get_symbol_specs(symbol) or {}
+        point_value = float(specs.get("point") or 0.01)
+        spread_points = float(specs.get("spread") or 0.0)
     
-    # Save a sample of the data to verify
-    strategy_df.tail(100).to_csv("strategy_data_tail.csv")
-    
-    print("\n--- Diagnostic: Anchor Bias Distribution in ETF data ---")
-    print(strategy_df['bias'].value_counts(dropna=False))
-    print("----------------------------------------------------\n")
+        print("Generating Signals...")
+        strategy_df = generate_signals_refined(
+            htf_data,
+            etf_data,
+            anchor_swing_window=7,
+            execution_swing_window=1,
+            entry_retracement=entry_retracement,
+            sweep_mode="prev_bar",
+            internal_structure_lookback_bars=1,
+            max_bos_wait_bars=8
+        )
 
-    print("Running Backtest...")
-    trades_df = run_backtest(
-        strategy_df, 
-        initial_balance=10000.0, 
-        risk_per_trade=0.01, 
-        spread_points=spread_points,
-        slippage_points=5,
-        commission_per_unit=0.07,
-        point_value=point_value
-    )
+        # Trim warmup: only keep rows from the actual backtest start onwards
+        strategy_df = strategy_df[strategy_df.index >= pd.Timestamp(etf_start)]
+        
+        # Save a sample of the data to verify
+        import os
+        os.makedirs("backtest_results", exist_ok=True)
+        strategy_df.tail(100).to_csv(f"backtest_results/strategy_data_tail_{symbol}.csv")
+        
+        print(f"\n--- Diagnostic: Anchor Bias Distribution in ETF data ({symbol}) ---")
+        print(strategy_df['bias'].value_counts(dropna=False))
+        print("----------------------------------------------------\n")
 
-    print("Creating Trade Plot...")
-    plot_results(strategy_df, trades_df, symbol)
+        print("Running Backtest...")
+        trades_df = run_backtest(
+            strategy_df, 
+            initial_balance=10000.0, 
+            risk_per_trade=0.01, 
+            spread_points=spread_points,
+            slippage_points=5,
+            commission_per_unit=0.07,
+            point_value=point_value,
+            symbol=symbol
+        )
 
-    # Monte Carlo simulation on trade PnLs
-    print("Running Monte Carlo simulation...")
-    final_balances = monte_carlo_simulation(trades_df, initial_balance=10000.0, n_sims=1000)
-    plot_return_distribution(final_balances, initial_balance=10000.0)
+        if not trades_df.empty:
+            trades_df['symbol'] = symbol
+            all_trades_dfs.append(trades_df)
+
+        print("Creating Trade Plot...")
+        plot_results(strategy_df, trades_df, symbol)
+
+        # Monte Carlo simulation on trade PnLs
+        print(f"Running Monte Carlo simulation for {symbol}...")
+        final_balances = monte_carlo_simulation(trades_df, initial_balance=10000.0, n_sims=1000)
+        # Note: If running many pairs, overriding monte carlo plot might hide earlier ones.
+        # Plot distribution uses default name, which might overwrite. We will just plot it.
+        try:
+            plot_return_distribution(final_balances, initial_balance=10000.0, output_file=f"monte_carlo_returns_{symbol}.png")
+        except Exception as e:
+            print(f"Monte Carlo plot skipped: {e}")
+
+    # Final combined statistics
+    if len(target_symbols) > 1 and all_trades_dfs:
+        print(f"\n\n{'*'*50}\nCOMBINED PORTFOLIO SUMMARY\n{'*'*50}")
+        combined_df = pd.concat(all_trades_dfs, ignore_index=True)
+        combined_df.sort_values('exit_time', inplace=True)
+        
+        total_pnl = combined_df['pnl'].sum()
+        total_trades = len(combined_df)
+        wins = len(combined_df[combined_df['result'] == 'Win'])
+        win_rate = wins / total_trades if total_trades > 0 else 0
+        
+        print(f"Total Combined Trades: {total_trades}")
+        print(f"Total Combined Wins: {wins}")
+        print(f"Combined Win Rate: {win_rate:.2%}")
+        print(f"Total Gross PnL: ${total_pnl:.2f}")
+        print(f"{'*'*50}\n")
 
 if __name__ == "__main__":
     main()
