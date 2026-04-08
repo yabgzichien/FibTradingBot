@@ -39,7 +39,7 @@ bool _write_rates_csv(string symbol, ENUM_TIMEFRAMES tf, int bars)
    int copied = CopyRates(symbol, tf, 0, bars, rates);
    if(copied <= 0) return false;
 
-   int handle = FileOpen(_rates_file(symbol, tf), FILE_WRITE|FILE_CSV|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ, ',');
+   int handle = FileOpen(_rates_file(symbol, tf), FILE_WRITE|FILE_CSV|FILE_COMMON);
    if(handle == INVALID_HANDLE) return false;
 
    FileWrite(handle, "time", "open", "high", "low", "close", "tick_volume", "spread", "real_volume");
@@ -113,19 +113,6 @@ bool _cancel_all_pending(string symbol, long magic)
    return true;
 }
 
-bool _has_position(string symbol, long magic)
-{
-   int total = PositionsTotal();
-   for(int i=0; i<total; i++)
-   {
-      ulong ticket = PositionGetTicket(i);
-      if(ticket == 0) continue;
-      if(PositionGetString(POSITION_SYMBOL) == symbol && (long)PositionGetInteger(POSITION_MAGIC) == magic)
-         return true;
-   }
-   return false;
-}
-
 bool _has_equivalent_pending(string symbol, long magic, int desired_type, double entry, double sl, double tp, double tol)
 {
    int total = OrdersTotal();
@@ -146,15 +133,12 @@ bool _has_equivalent_pending(string symbol, long magic, int desired_type, double
    return false;
 }
 
-bool _place_limit(string symbol, long magic, int dir, double entry, double sl, double tp, double risk_usd, double replace_tol_points, int max_pending_bars)
+bool _place_limit(string symbol, long magic, int dir, double entry, double sl, double tp, double risk_usd, double replace_tol_points)
 {
    if(!SymbolSelect(symbol, true)) return false;
    double point = SymbolInfoDouble(symbol, SYMBOL_POINT);
    int digits = (int)SymbolInfoInteger(symbol, SYMBOL_DIGITS);
    double tol = replace_tol_points * point;
-
-   if(_has_position(symbol, magic))
-      return false;
 
    int desired_type = (dir == 1) ? ORDER_TYPE_BUY_LIMIT : ORDER_TYPE_SELL_LIMIT;
    if(_has_equivalent_pending(symbol, magic, desired_type, entry, sl, tp, tol))
@@ -203,18 +187,7 @@ bool _place_limit(string symbol, long magic, int dir, double entry, double sl, d
    req.sl = sl;
    req.tp = tp;
    req.magic = magic;
-
-   if(max_pending_bars > 0)
-   {
-      req.type_time = ORDER_TIME_SPECIFIED;
-      int period_seconds = PeriodSeconds(InpExecutionTF);
-      req.expiration = TimeCurrent() + (max_pending_bars * period_seconds);
-   }
-   else
-   {
-      req.type_time = ORDER_TIME_GTC;
-   }
-
+   req.type_time = ORDER_TIME_GTC;
    req.type_filling = ORDER_FILLING_RETURN;
 
    bool ok = OrderSend(req, res);
@@ -235,10 +208,8 @@ void _gv_set_last_line(long v)
 
 void _process_commands()
 {
-   int handle = FileOpen(_commands_file(), FILE_READ|FILE_CSV|FILE_ANSI|FILE_COMMON|FILE_SHARE_READ|FILE_SHARE_WRITE, ',');
+   int handle = FileOpen(_commands_file(), FILE_READ|FILE_CSV|FILE_COMMON);
    if(handle == INVALID_HANDLE) return;
-
-   if(FileSize(handle) < 10) _gv_set_last_line(0);
 
    long last_line = _gv_last_line();
    long line_no = 0;
@@ -293,8 +264,7 @@ void _process_commands()
          double tp = StringToDouble(tp_s);
          double risk = StringToDouble(risk_s);
          double tol_points = StringToDouble(tol_s);
-         int max_pb = (int)StringToInteger(maxpb_s);
-         _place_limit(symbol, magic, dir, entry, sl, tp, risk, tol_points, max_pb);
+         _place_limit(symbol, magic, dir, entry, sl, tp, risk, tol_points);
       }
    }
 

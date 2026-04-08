@@ -154,9 +154,10 @@ def generate_signals_refined(
 
     combined['setup_id'] = np.nan
     combined['setup_dir'] = np.nan
-    combined['sweep_time'] = pd.NaT
+    # Match the dtype of the index to avoid timezone mismatch errors (naive vs aware)
+    combined['sweep_time'] = pd.Series(pd.NaT, index=combined.index, dtype=combined.index.dtype)
     combined['sweep_price'] = np.nan
-    combined['bos_time'] = pd.NaT
+    combined['bos_time'] = pd.Series(pd.NaT, index=combined.index, dtype=combined.index.dtype)
     combined['bos_price'] = np.nan
     combined['entry_level'] = np.nan
     combined['sl_level'] = np.nan
@@ -360,7 +361,7 @@ def generate_signals_refined(
                 active = None
 
     if max_pending_bars is not None and max_pending_bars > 0:
-        cols_to_ffill = ['setup_id', 'setup_dir', 'entry_level', 'sl_level', 'tp_level']
+        cols_to_ffill = ['setup_id', 'setup_dir', 'entry_level', 'sl_level', 'tp_level', 'bos_time']
         combined[cols_to_ffill] = combined[cols_to_ffill].ffill(limit=max_pending_bars)
 
     return combined
