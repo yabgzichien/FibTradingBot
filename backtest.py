@@ -286,7 +286,8 @@ def run_backtest(
     both_hit_policy="sl",
     allow_entry_bar_tp=True,
     symbol="UNKNOWN",
-    return_events=False
+    return_events=False,
+    save_csv=True
 ):
     """
     Runs an iterrows backtest with realistic costs (spread, slippage, commission).
@@ -782,10 +783,11 @@ def run_backtest(
         print("No trades taken during the period.")
 
     # Save trade-by-trade details to CSV
-    if not trades_df.empty:
+    if save_csv and not trades_df.empty:
         export_cols = [
             'entry_time',
             'exit_time',
+            'type',
             'entry',
             'tp_price',
             'sl_price',

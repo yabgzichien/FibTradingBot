@@ -29,9 +29,17 @@ class BridgeConfig:
     max_bos_wait_bars: int = 8
 
 
+LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ea_bridge.log")
+
 def _log(msg: str):
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-    print(f"{ts} [ea_bridge] {msg}", flush=True)
+    log_line = f"{ts} [ea_bridge] {msg}"
+    print(log_line, flush=True)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(log_line + "\n")
+    except Exception as e:
+        print(f"[Logging Error] {e}", flush=True)
 
 
 def _common_files_dir() -> str:
@@ -196,10 +204,20 @@ def run_bridge(config: BridgeConfig):
     )
     _ensure_commands_file()
     last_sent_setup = {}
+    start_time = datetime.now(timezone.utc)
+    _log(f"Bridge started at: {start_time.strftime('%Y-%m-%d %H:%M:%S')} UTC")
 
     while True:
-        cycle_ts = datetime.now(timezone.utc).isoformat()
-        _log("Cycle start")
+        now = datetime.now(timezone.utc)
+        cycle_ts = now.isoformat()
+        
+        uptime = now - start_time
+        days = uptime.days
+        hours, remainder = divmod(uptime.seconds, 3600)
+        minutes, _ = divmod(remainder, 60)
+        uptime_str = f"{days}d {hours}h {minutes}m"
+        
+        _log(f"Cycle start | Uptime: {uptime_str}")
         for symbol in config.symbols:
             anchor_path = _rates_path(symbol, config.anchor_tf)
             exec_path = _rates_path(symbol, config.execution_tf)

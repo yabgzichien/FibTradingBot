@@ -4,6 +4,7 @@ from backtest import run_backtest, plot_results, monte_carlo_simulation, plot_re
 from datetime import datetime, timedelta
 import pandas as pd
 import pytz
+import MetaTrader5 as mt5
 
 def main():
     if not initialize_mt5():
@@ -39,7 +40,12 @@ def main():
     print("2. Specific start and end dates (YYYY-MM-DD)")
     date_choice = input("Enter choice (1-2) [default 1]: ").strip() or "1"
     
-    end_date = datetime.utcnow()
+    tick = mt5.symbol_info_tick(target_symbols[0])
+    if tick:
+        end_date = datetime.utcfromtimestamp(tick.time)
+    else:
+        end_date = datetime.utcnow() + timedelta(hours=3) # Fallback to GMT+3
+        
     etf_start = end_date - timedelta(days=3)  # Default
     
     if date_choice == "1":
