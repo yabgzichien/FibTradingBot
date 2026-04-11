@@ -136,7 +136,8 @@ def main():
             commission_per_unit=0.07,
             point_value=point_value,
             symbol=symbol,
-            return_events=want_replay
+            return_events=want_replay,
+            invert_signals=True
         )
 
         if want_replay:

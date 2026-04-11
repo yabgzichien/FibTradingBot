@@ -305,7 +305,8 @@ def run_backtest(
     allow_entry_bar_tp=True,
     symbol="UNKNOWN",
     return_events=False,
-    save_csv=True
+    save_csv=True,
+    invert_signals=False
 ):
     """
     Runs an iterrows backtest with realistic costs (spread, slippage, commission).
@@ -349,97 +350,63 @@ def run_backtest(
         
         # Check if we need to close the current position
         if in_position:
+            bar_o = row['open']
+            bar_h = row['high']
+            bar_l = row['low']
+            path_o, path_first, path_second = _bar_sequence(bar_o, bar_h, bar_l)
+            
             if position_type == 1: # Long
-                sl_hit = row['low'] <= sl_price
-                tp_hit = row['high'] >= tp_price
+                sl_hit = bar_l <= sl_price
+                tp_hit = bar_h >= tp_price
+                
                 if sl_hit and tp_hit:
-                    exit_at_sl = (both_hit_policy != "tp")
+                    # Chronological check
+                    if path_first == bar_l:
+                        exit_at_sl = True # Hit SL bottom first
+                    else:
+                        exit_at_sl = False # Hit TP top first
                 else:
                     exit_at_sl = sl_hit
+                    
                 if exit_at_sl:
-                    # Stopped out at SL (plus slippage)
                     execution_exit = sl_price - exit_cost_points
                     pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
                     balance += pnl
-                    if verbose:
-                        print(f"[{index}] CLOSED LONG at {execution_exit:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-                    trades.append({
-                        'entry_time': entry_time,
-                        'exit_time': index,
-                        'type': 'Long',
-                        'entry': entry_price,
-                        'tp_price': tp_price,
-                        'sl_price': sl_price,
-                        'exit': execution_exit,
-                        'pnl': pnl,
-                        'result': 'Loss'
-                    })
+                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Loss'})
                     in_position = False
                 elif tp_hit:
-                    # Take profit hit (plus slippage)
                     execution_exit = tp_price - exit_cost_points
                     pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
                     balance += pnl
-                    if verbose:
-                        print(f"[{index}] CLOSED LONG at {execution_exit:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-                    trades.append({
-                        'entry_time': entry_time,
-                        'exit_time': index,
-                        'type': 'Long',
-                        'entry': entry_price,
-                        'tp_price': tp_price,
-                        'sl_price': sl_price,
-                        'exit': execution_exit,
-                        'pnl': pnl,
-                        'result': 'Win'
-                    })
+                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Win'})
                     in_position = False
+                    
             elif position_type == -1: # Short
-                sl_hit = row['high'] >= sl_price
-                tp_hit = row['low'] <= tp_price
+                sl_hit = bar_h >= sl_price
+                tp_hit = bar_l <= tp_price
+                
                 if sl_hit and tp_hit:
-                    exit_at_sl = (both_hit_policy != "tp")
+                    # Chronological check
+                    if path_first == bar_h:
+                        exit_at_sl = True # Hit SL top first
+                    else:
+                        exit_at_sl = False # Hit TP bottom first
                 else:
                     exit_at_sl = sl_hit
+                    
                 if exit_at_sl:
-                    # Stopped out at SL (plus slippage)
                     execution_exit = sl_price + exit_cost_points
                     pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
                     balance += pnl
-                    if verbose:
-                        print(f"[{index}] CLOSED SHORT at {execution_exit:.4f} (Stop Loss) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-                    trades.append({
-                        'entry_time': entry_time,
-                        'exit_time': index,
-                        'type': 'Short',
-                        'entry': entry_price,
-                        'tp_price': tp_price,
-                        'sl_price': sl_price,
-                        'exit': execution_exit,
-                        'pnl': pnl,
-                        'result': 'Loss'
-                    })
+                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Loss'})
                     in_position = False
                 elif tp_hit:
-                    # Take profit hit (plus slippage)
                     execution_exit = tp_price + exit_cost_points
                     pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
                     balance += pnl
-                    if verbose:
-                        print(f"[{index}] CLOSED SHORT at {execution_exit:.4f} (Take Profit) | PnL: ${pnl:.2f} | Balance: ${balance:.2f}")
-                    trades.append({
-                        'entry_time': entry_time,
-                        'exit_time': index,
-                        'type': 'Short',
-                        'entry': entry_price,
-                        'tp_price': tp_price,
-                        'sl_price': sl_price,
-                        'exit': execution_exit,
-                        'pnl': pnl,
-                        'result': 'Win'
-                    })
+                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Win'})
                     in_position = False
-                    
+
         if not in_position:
             if use_refined_setups and ('entry_level' in df.columns) and ('setup_id' in df.columns) and ('setup_dir' in df.columns):
                 sid = row.get('setup_id', np.nan)
@@ -480,16 +447,37 @@ def run_backtest(
                 bar_l = row['low']
                 path_o, path_first, path_second = _bar_sequence(bar_o, bar_h, bar_l)
 
-                if pending_dir == 1:  # Pending Long (limit buy)
-                    # Check if bar touches or gaps through the pending_entry level
+                # Evaluator for trigger condition purely based on original pending_dir
+                is_triggered = False
+                trigger_path_first = None
+                actual_fill = pending_entry
+
+                if pending_dir == 1:  # Original Long
                     if bar_l <= pending_entry:
-                        # Gap fill: if we open below (or at) the limit, fill at Open
-                        if bar_o <= pending_entry:
-                            actual_fill = bar_o
-                        else:
-                            actual_fill = pending_entry
-                        execution_entry = actual_fill + entry_cost_points
-                        sl_dist = execution_entry - pending_sl
+                        is_triggered = True
+                        actual_fill = bar_o if bar_o <= pending_entry else pending_entry
+                        trigger_path_first = bar_l
+                else:  # Original Short
+                    if bar_h >= pending_entry:
+                        is_triggered = True
+                        actual_fill = bar_o if bar_o >= pending_entry else pending_entry
+                        trigger_path_first = bar_h
+
+                if is_triggered:
+                    opened_dir = pending_dir
+                    sl_level_target = pending_sl
+                    tp_level_target = pending_tp
+                    
+                    if invert_signals:
+                        opened_dir = -pending_dir
+                        sl_level_target = pending_tp
+                        tp_level_target = pending_sl
+
+                    original_execution_entry = actual_fill + entry_cost_points if pending_dir == 1 else actual_fill - entry_cost_points
+
+                    if opened_dir == 1:
+                        execution_entry = original_execution_entry
+                        sl_dist = execution_entry - sl_level_target
                         if sl_dist > 0:
                             base_balance = initial_balance if risk_base == "initial" else balance
                             min_sl_dist = float(min_sl_points) * point_value
@@ -498,75 +486,12 @@ def run_backtest(
                             in_position = True
                             position_type = 1
                             entry_price = execution_entry
-                            sl_price = pending_sl
-                            tp_price = pending_tp
+                            sl_price = sl_level_target
+                            tp_price = tp_level_target
                             entry_time = index
-                        pending = False
-                        pending_setup_id = None
-                        pending_since_i = None
-                        pending_active_from_i = None
-                        if in_position:
-                            # ── Intra-bar exit check with path heuristic ─────────────
-                            # Determine which extreme was reached first AFTER entry.
-                            # If the first extreme in the path sequence is >= entry,
-                            # then TP could have been hit before entry was reached.
-                            # We use: if entry was filled at pending_entry via the
-                            # LOW touching the level, the path went Open→(maybe high)
-                            # first, then Low. We conservatively assume entry happened
-                            # at the Low point in the path, so only path_second
-                            # (the high) is available for TP.
-                            sl_hit  = bar_l <= sl_price
-                            tp_hit  = bar_h >= tp_price
-
-                            # TP is only valid if, after entry (which needs the Low
-                            # to touch), the High was still reachable — i.e. the bar
-                            # went Low first then High (path_first == bar_l case).
-                            tp_reachable_after_entry = (
-                                allow_entry_bar_tp
-                                and tp_hit
-                                and (path_first == bar_l or bar_o <= pending_entry)
-                                # If bar opened below entry (gap), we filled at open
-                                # and the TP could legitimately be hit later in the bar.
-                            )
-
-                            if sl_hit and tp_hit:
-                                # Both hit — apply policy
-                                if both_hit_policy == "tp" and tp_reachable_after_entry:
-                                    execution_exit = tp_price - exit_cost_points
-                                    pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
-                                    balance += pnl
-                                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Win'})
-                                    in_position = False
-                                else:
-                                    execution_exit = sl_price - exit_cost_points
-                                    pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
-                                    balance += pnl
-                                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Loss'})
-                                    in_position = False
-                            elif sl_hit:
-                                execution_exit = sl_price - exit_cost_points
-                                pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
-                                balance += pnl
-                                trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Loss'})
-                                in_position = False
-                            elif tp_reachable_after_entry:
-                                execution_exit = tp_price - exit_cost_points
-                                pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size)
-                                balance += pnl
-                                trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Win'})
-                                in_position = False
-                            if verbose and not in_position:
-                                print(f"[{index}] ENTRY+EXIT LONG on same bar @ entry={entry_price:.4f}")
-
-                else:  # Pending Short (limit sell)
-                    if bar_h >= pending_entry:
-                        # Gap fill: if we open above (or at) the limit, fill at Open
-                        if bar_o >= pending_entry:
-                            actual_fill = bar_o
-                        else:
-                            actual_fill = pending_entry
-                        execution_entry = actual_fill - entry_cost_points
-                        sl_dist = pending_sl - execution_entry
+                    else:
+                        execution_entry = original_execution_entry
+                        sl_dist = sl_level_target - execution_entry
                         if sl_dist > 0:
                             base_balance = initial_balance if risk_base == "initial" else balance
                             min_sl_dist = float(min_sl_points) * point_value
@@ -575,53 +500,83 @@ def run_backtest(
                             in_position = True
                             position_type = -1
                             entry_price = execution_entry
-                            sl_price = pending_sl
-                            tp_price = pending_tp
+                            sl_price = sl_level_target
+                            tp_price = tp_level_target
                             entry_time = index
-                        pending = False
-                        pending_setup_id = None
-                        pending_since_i = None
-                        pending_active_from_i = None
-                        if in_position:
-                            sl_hit  = bar_h >= sl_price
-                            tp_hit  = bar_l <= tp_price
+                            
+                    pending = False
+                    pending_setup_id = None
+                    pending_since_i = None
+                    pending_active_from_i = None
 
-                            # TP is reachable after entry if the bar went High first
-                            # then Low (i.e., we entered on the High touching limit,
-                            # and the path_second was Low → TP).
-                            tp_reachable_after_entry = (
-                                allow_entry_bar_tp
-                                and tp_hit
-                                and (path_first == bar_h or bar_o >= pending_entry)
-                            )
+                    if in_position:
+                        # ── Chronological Intra-bar check ─────────────
+                        sl_reachable = False
+                        tp_reachable = False
+                        
+                        if position_type == 1:
+                            sl_hit = bar_l <= sl_price
+                            tp_hit = bar_h >= tp_price
+                            if trigger_path_first == bar_l:
+                                sl_reachable = sl_hit
+                                tp_reachable = tp_hit and (path_first == bar_l or bar_o <= pending_entry)
+                            else:
+                                sl_reachable = sl_hit and (path_first == bar_h or bar_o >= pending_entry)
+                                tp_reachable = tp_hit
+                        else:  # Short
+                            sl_hit = bar_h >= sl_price
+                            tp_hit = bar_l <= tp_price
+                            if trigger_path_first == bar_l:
+                                sl_reachable = sl_hit and (path_first == bar_l or bar_o <= pending_entry)
+                                tp_reachable = tp_hit
+                            else:
+                                sl_reachable = sl_hit
+                                tp_reachable = tp_hit and (path_first == bar_h or bar_o >= pending_entry)
 
-                            if sl_hit and tp_hit:
-                                if both_hit_policy == "tp" and tp_reachable_after_entry:
-                                    execution_exit = tp_price + exit_cost_points
-                                    pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
-                                    balance += pnl
-                                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Win'})
-                                    in_position = False
+                        if not allow_entry_bar_tp:
+                            tp_reachable = False
+                            
+                        # If both hit in the entry bar, the chronologically FIRST target wins!
+                        if sl_reachable and tp_reachable:
+                            # Both are reachable! We determine which came first via path sequence.
+                            if position_type == 1:
+                                # Long: SL is downside, TP is upside
+                                if path_first == bar_l:
+                                    # Hit low first, so SL hit first
+                                    sl_hit_first = True
                                 else:
-                                    execution_exit = sl_price + exit_cost_points
-                                    pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
-                                    balance += pnl
-                                    trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Loss'})
-                                    in_position = False
-                            elif sl_hit:
-                                execution_exit = sl_price + exit_cost_points
-                                pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
-                                balance += pnl
-                                trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Loss'})
-                                in_position = False
-                            elif tp_reachable_after_entry:
-                                execution_exit = tp_price + exit_cost_points
-                                pnl = (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
-                                balance += pnl
-                                trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Short', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Win'})
-                                in_position = False
-                            if verbose and not in_position:
-                                print(f"[{index}] ENTRY+EXIT SHORT on same bar @ entry={entry_price:.4f}")
+                                    sl_hit_first = False
+                            else:
+                                # Short: SL is upside, TP is downside
+                                if path_first == bar_h:
+                                    # Hit high first, so SL hit first
+                                    sl_hit_first = True
+                                else:
+                                    sl_hit_first = False
+                                    
+                            if sl_hit_first:
+                                forced_result = 'Loss'
+                            else:
+                                forced_result = 'Win'
+                        elif sl_reachable:
+                            forced_result = 'Loss'
+                        elif tp_reachable:
+                            forced_result = 'Win'
+                        else:
+                            forced_result = None
+
+                        if forced_result == 'Loss':
+                            execution_exit = (sl_price - exit_cost_points) if position_type == 1 else (sl_price + exit_cost_points)
+                            pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size) if position_type == 1 else (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
+                            balance += pnl
+                            trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long' if position_type == 1 else 'Short', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Loss'})
+                            in_position = False
+                        elif forced_result == 'Win':
+                            execution_exit = (tp_price - exit_cost_points) if position_type == 1 else (tp_price + exit_cost_points)
+                            pnl = (execution_exit - entry_price) * position_size - (commission_per_unit * position_size) if position_type == 1 else (entry_price - execution_exit) * position_size - (commission_per_unit * position_size)
+                            balance += pnl
+                            trades.append({'entry_time': entry_time, 'exit_time': index, 'type': 'Long' if position_type == 1 else 'Short', 'entry': entry_price, 'tp_price': tp_price, 'sl_price': sl_price, 'exit': execution_exit, 'pnl': pnl, 'result': 'Win'})
+                            in_position = False
             elif (not pending) and (not in_position):
                 htf_trend = row.get('htf_trend', 0)
                 if pd.isna(row.get('last_swing_high', np.nan)) or pd.isna(row.get('last_swing_low', np.nan)):
