@@ -107,11 +107,12 @@ def main():
             htf_data,
             etf_data,
             anchor_swing_window=7,
-            execution_swing_window=1,
+            execution_swing_window=3,
             entry_retracement=entry_retracement,
-            sweep_mode="prev_bar",
-            internal_structure_lookback_bars=1,
-            max_bos_wait_bars=8
+            sweep_mode="rolling",          # Real liquidity sweep (not prev-bar noise)
+            sweep_lookback_bars=8,         # Sweep must break 2hr (8 x 15min) rolling low/high
+            internal_structure_lookback_bars=4,  # BOS must break 1hr (4 x 15min) of structure
+            max_bos_wait_bars=24           # Up to 6 hours to confirm BOS after sweep
         )
 
         # Trim warmup: only keep rows from the actual backtest start onwards
@@ -135,6 +136,7 @@ def main():
             slippage_points=5,
             commission_per_unit=0.07,
             point_value=point_value,
+            require_fvg=False,             # FVG logged but not required; re-enable to filter further
             symbol=symbol,
             return_events=want_replay
         )
@@ -143,7 +145,7 @@ def main():
             trades_df, events = result
             from visual_replay import generate_visual_replay
             print("Generating Visual Replay HTML...")
-            generate_visual_replay(events, symbol)
+            generate_visual_replay(events, symbol, htf_df=htf_data)
         else:
             trades_df = result
 

@@ -303,6 +303,7 @@ def run_backtest(
     min_sl_points=0.0,
     both_hit_policy="sl",
     allow_entry_bar_tp=True,
+    require_fvg=False,
     symbol="UNKNOWN",
     return_events=False,
     save_csv=True
@@ -447,6 +448,11 @@ def run_backtest(
                 entry_level = row.get('entry_level', np.nan)
                 sl_level = row.get('sl_level', np.nan)
                 tp_level = row.get('tp_level', np.nan)
+                entry_in_fvg = bool(row.get('entry_in_fvg', False))
+
+                # FVG confluence filter: skip setups where entry does not sit
+                # inside a Fair Value Gap between the sweep and BOS bars.
+                fvg_ok = (not require_fvg) or entry_in_fvg
 
                 if (
                     pd.notna(sid)
@@ -454,6 +460,7 @@ def run_backtest(
                     and pd.notna(entry_level)
                     and pd.notna(sl_level)
                     and pd.notna(tp_level)
+                    and fvg_ok
                     and (sid not in used_setup_ids)
                     and (replace_pending_on_new_setup or not pending)
                     and ((not pending) or (pending_setup_id != sid))

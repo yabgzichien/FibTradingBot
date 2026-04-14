@@ -1,29 +1,114 @@
 import pandas as pd
 import numpy as np
 
-def find_swings(df, window=5):
+def find_swings(df, window=2):
     """
-    Finds swing highs and swing lows in a dataframe.
-    A swing high is the highest high within a local window (before and after).
-    A swing low is the lowest low within a local window.
+    Williams Fractal swing detection with ZigZag-style significance filter.
+
+    Step 1 — Detect raw Williams Fractals:
+        A Fractal High at bar[i]: high[i] strictly > all `window` bars left AND right.
+        A Fractal Low  at bar[i]: low[i]  strictly < all `window` bars left AND right.
+        Confirmed `window` bars later (no look-ahead bias).
+
+    Step 2 — Filter to SIGNIFICANT fractals:
+        Among consecutive fractal highs (before any fractal low interrupts the run),
+        keep ONLY the highest.  Among consecutive fractal lows, keep ONLY the lowest.
+        This produces proper alternating market structure points — the "circled"
+        fractals that represent real swing pivots, not noise inside a move.
+
+    `is_swing_high` / `is_swing_low`   → all confirmed raw fractals (for internal use)
+    `last_swing_high` / `last_swing_low` → forward-filled SIGNIFICANT swings only
     """
     df = df.copy()
-    
-    rolling_max = df['high'].rolling(window=2*window+1, center=True).max()
-    rolling_min = df['low'].rolling(window=2*window+1, center=True).min()
-    
-    is_swing_high = (df['high'] == rolling_max)
-    is_swing_low = (df['low'] == rolling_min)
-    
-    df['is_swing_high'] = is_swing_high.shift(window).fillna(False)
-    df['is_swing_low'] = is_swing_low.shift(window).fillna(False)
-    
-    df['swing_high_val'] = np.where(df['is_swing_high'], df['high'].shift(window), np.nan)
-    df['swing_low_val'] = np.where(df['is_swing_low'], df['low'].shift(window), np.nan)
-    
-    df['last_swing_high'] = df['swing_high_val'].ffill()
-    df['last_swing_low'] = df['swing_low_val'].ffill()
-    
+    h = df['high'].to_numpy()
+    l = df['low'].to_numpy()
+    n = len(h)
+
+    raw_fh = np.zeros(n, dtype=bool)
+    raw_fl = np.zeros(n, dtype=bool)
+
+    for i in range(window, n - window):
+        left_h  = h[i - window : i]
+        right_h = h[i + 1     : i + window + 1]
+        if h[i] > left_h.max() and h[i] > right_h.max():
+            raw_fh[i] = True
+
+        left_l  = l[i - window : i]
+        right_l = l[i + 1     : i + window + 1]
+        if l[i] < left_l.min() and l[i] < right_l.min():
+            raw_fl[i] = True
+
+    # ── Confirmation shift ────────────────────────────────────────────────────
+    # Raw fractal at bar i is knowable only after bar i+window closes.
+    confirmed_fh = np.zeros(n, dtype=bool)
+    confirmed_fl = np.zeros(n, dtype=bool)
+    confirmed_fh[window:] = raw_fh[:-window]
+    confirmed_fl[window:] = raw_fl[:-window]
+
+    fh_src = np.where(raw_fh)[0]
+    fl_src = np.where(raw_fl)[0]
+
+    sv_high = np.full(n, np.nan)
+    sv_low  = np.full(n, np.nan)
+    valid_fh = fh_src[fh_src + window < n]
+    valid_fl = fl_src[fl_src + window < n]
+    sv_high[valid_fh + window] = h[valid_fh]
+    sv_low [valid_fl + window] = l[valid_fl]
+
+    # ── ZigZag significance filter ────────────────────────────────────────────
+    # Build a time-ordered list of all confirmed fractal events.
+    events = []
+    for src_i in valid_fh:
+        events.append(('H', src_i + window, h[src_i]))  # (type, conf_bar, value)
+    for src_i in valid_fl:
+        events.append(('L', src_i + window, l[src_i]))
+    events.sort(key=lambda x: x[1])  # sort by confirmation bar index
+
+    # Walk through events: keep running candidate for each direction,
+    # only committing it when the direction flips.
+    sig_high = np.full(n, np.nan)
+    sig_low  = np.full(n, np.nan)
+
+    direction    = None   # 'H' or 'L' — current run direction
+    cand_conf_i  = None
+    cand_val     = None
+
+    def _commit(direction, cand_conf_i, cand_val):
+        if direction == 'H':
+            sig_high[cand_conf_i] = cand_val
+        else:
+            sig_low[cand_conf_i] = cand_val
+
+    for ev_type, conf_i, val in events:
+        if direction is None:
+            # First event ever — start a candidate
+            direction, cand_conf_i, cand_val = ev_type, conf_i, val
+
+        elif ev_type == direction:
+            # Same direction — update candidate if more extreme
+            if ev_type == 'H' and val > cand_val:
+                cand_conf_i, cand_val = conf_i, val
+            elif ev_type == 'L' and val < cand_val:
+                cand_conf_i, cand_val = conf_i, val
+
+        else:
+            # Direction flipped — commit the previous candidate, start a new one
+            _commit(direction, cand_conf_i, cand_val)
+            direction, cand_conf_i, cand_val = ev_type, conf_i, val
+
+    # Commit the final open candidate
+    if direction is not None:
+        _commit(direction, cand_conf_i, cand_val)
+
+    # ── Populate dataframe columns ────────────────────────────────────────────
+    df['is_swing_high']   = confirmed_fh          # all raw confirmed fractals
+    df['is_swing_low']    = confirmed_fl
+    df['swing_high_val']  = sv_high               # raw fractal prices
+    df['swing_low_val']   = sv_low
+    # last_swing_high / low carry only the SIGNIFICANT (filtered) pivots
+    df['last_swing_high'] = pd.Series(sig_high, index=df.index).ffill()
+    df['last_swing_low']  = pd.Series(sig_low,  index=df.index).ffill()
+
     return df
 
 def determine_trend(df):
@@ -361,7 +446,7 @@ def generate_signals_refined(
                 active = None
 
     if max_pending_bars is not None and max_pending_bars > 0:
-        cols_to_ffill = ['setup_id', 'setup_dir', 'entry_level', 'sl_level', 'tp_level', 'bos_time']
+        cols_to_ffill = ['setup_id', 'setup_dir', 'entry_level', 'sl_level', 'tp_level', 'bos_time', 'entry_in_fvg']
         combined[cols_to_ffill] = combined[cols_to_ffill].ffill(limit=max_pending_bars)
 
     return combined
