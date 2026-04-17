@@ -174,7 +174,7 @@ def sync_pending_order(symbol, action, entry, sl, tp, risk_dollars):
         cancel_all_bot_pending_orders(
             symbol, MAGIC_NUMBER, reason="setup changed; replacing with latest structure"
         )
-
+    
     return execute_trade(symbol, action, entry, sl, tp, risk_dollars)
 
 def calculate_lot_size(symbol, entry_price, sl_price, risk_dollars):
@@ -313,7 +313,7 @@ def execute_trade(symbol, action, entry, sl, tp, risk_dollars):
         "sl": float(sl),
         "tp": float(tp),
         "magic": MAGIC_NUMBER,
-        "comment": "Fib Bot Trade",
+        "comment": "OldFibBot",
         "type_time": mt5.ORDER_TIME_GTC,
         "type_filling": filling_mode,
     }
@@ -454,7 +454,10 @@ def analyze_and_trade():
     if bid is None:
         return
 
-    action = 1 if int(setup_dir) == 1 else -1
+    # SWITCH THE EXECUTION LOGIC FROM BUY TO SELL AND VICE VERSA
+    action = -1 if int(setup_dir) == 1 else 1
+    sl_level, tp_level = tp_level, sl_level
+    
     logging.info(
         f"Placing setup. Dir={'BUY' if action == 1 else 'SELL'} Entry={float(entry_level):.2f} "
         f"SL={float(sl_level):.2f} TP={float(tp_level):.2f} EntryInFVG={entry_in_fvg} "
